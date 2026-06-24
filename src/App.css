@@ -64,6 +64,33 @@ body {
   white-space: nowrap;
 }
 
+.model-selector {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.model-selector label {
+  font-size: 13px;
+  color: #aaa;
+}
+
+.model-selector select {
+  background: #444;
+  color: #eee;
+  border: 1px solid #555;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 13px;
+  cursor: pointer;
+  outline: none;
+}
+
+.model-selector select:hover {
+  border-color: #396cd8;
+}
+
 .loading-hint {
   text-align: center;
   padding: 20px;

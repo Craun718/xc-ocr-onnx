@@ -26,6 +26,8 @@ pub struct OcrBlock {
 pub struct OcrEngine {
     det_session: Mutex<ort::session::Session>,
     rec_session: Mutex<ort::session::Session>,
+    det_output: String,
+    rec_output: String,
     keys: Vec<String>,
 }
 
@@ -36,25 +38,30 @@ impl OcrEngine {
         let rec_session = ort::session::Session::builder()?
             .commit_from_memory(rec_model)?;
 
+        let det_output = det_session.outputs()[0].name().to_string();
+        let rec_output = rec_session.outputs()[0].name().to_string();
+
         let keys_str = std::str::from_utf8(keys_data)?;
         let keys: Vec<String> = keys_str.lines().map(|s| s.to_string()).collect();
 
         Ok(Self {
             det_session: Mutex::new(det_session),
             rec_session: Mutex::new(rec_session),
+            det_output,
+            rec_output,
             keys,
         })
     }
 
     pub fn detect_text_regions(&self, image: &DynamicImage) -> Result<Vec<TextRegion>, Box<dyn std::error::Error>> {
         let mut session = self.det_session.lock().map_err(|e| format!("{}", e))?;
-        det::detect_text_regions(&mut session, image)
+        det::detect_text_regions(&mut session, image, &self.det_output)
     }
 
     pub fn recognize_text(&self, image: &DynamicImage, region: &TextRegion) -> Result<String, Box<dyn std::error::Error>> {
         let (data, width) = rec::preprocess_region(image, region)?;
         let mut session = self.rec_session.lock().map_err(|e| format!("{}", e))?;
-        let probs = rec::run_recognition(&mut session, &data, width)?;
+        let probs = rec::run_recognition(&mut session, &data, width, &self.rec_output)?;
         let text = decode::ctc_decode(&probs, &self.keys);
         Ok(text)
     }

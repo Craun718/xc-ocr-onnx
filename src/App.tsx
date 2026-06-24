@@ -27,10 +27,31 @@ function App() {
   const [currentPage, setCurrentPage] = useState(0);
   const [fileName, setFileName] = useState("");
 
+  // model switching
+  const [models, setModels] = useState<string[]>([]);
+  const [currentModel, setCurrentModel] = useState("");
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rawBase64Ref = useRef<string>("");
+
+  useEffect(() => {
+    invoke<string[]>("list_models").then((list) => {
+      setModels(list);
+      if (list.length > 0) setCurrentModel(list[0]);
+    }).catch(console.error);
+  }, []);
+
+  const handleModelChange = async (variant: string) => {
+    setCurrentModel(variant);
+    setBlocks([]);
+    try {
+      await invoke("switch_model", { variant });
+    } catch (err) {
+      alert("切换模型失败: " + err);
+    }
+  };
 
   const handleFileSelect = () => {
     fileInputRef.current?.click();
@@ -148,6 +169,20 @@ function App() {
         <button onClick={handleRecognize} disabled={!imageDataUrl || loading}>
           {loading ? "识别中..." : "识别"}
         </button>
+
+        {models.length > 1 && (
+          <div className="model-selector">
+            <label>模型：</label>
+            <select
+              value={currentModel}
+              onChange={(e) => handleModelChange(e.target.value)}
+            >
+              {models.map((m) => (
+                <option key={m} value={m}>{m}</option>
+              ))}
+            </select>
+          </div>
+        )}
       </div>
 
       {loading && <div className="loading-hint">处理中，请稍候...</div>}

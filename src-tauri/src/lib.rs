@@ -71,24 +71,86 @@ fn render_docx(
     Ok(results)
 }
 
-fn load_model_bytes(name: &str) -> Result<Vec<u8>, String> {
+// ── model commands ─────────────────────────────────────────────────
+
+#[tauri::command]
+fn list_models() -> Result<Vec<String>, String> {
+    find_models_root()
+        .map(|dir| {
+            let mut variants: Vec<String> = std::fs::read_dir(&dir)
+                .ok()
+                .into_iter()
+                .flatten()
+                .filter_map(|e| {
+                    let path = e.ok()?;
+                    if path.file_type().ok()?.is_dir() {
+                        Some(path.file_name().to_string_lossy().to_string())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            variants.sort();
+            variants
+        })
+}
+
+#[tauri::command]
+fn switch_model(
+    state: tauri::State<OcrState>,
+    variant: String,
+) -> Result<(), String> {
+    let model_dir = find_models_root()?.join(&variant);
+
+    let det_path = model_dir.join("det.onnx");
+    let rec_path = model_dir.join("rec.onnx");
+    let keys_path = model_dir.join("keys.txt");
+
+    let det_bytes = std::fs::read(&det_path)
+        .map_err(|e| format!("读取 {variant}/det.onnx 失败: {e}"))?;
+    let rec_bytes = std::fs::read(&rec_path)
+        .map_err(|e| format!("读取 {variant}/rec.onnx 失败: {e}"))?;
+    let keys_bytes = std::fs::read(&keys_path)
+        .map_err(|e| format!("读取 {variant}/keys.txt 失败: {e}"))?;
+
+    let engine = ocr::OcrEngine::new(&det_bytes, &rec_bytes, &keys_bytes)
+        .map_err(|e| format!("加载模型 {variant} 失败: {e}"))?;
+
+    let mut guard = state.engine.lock().map_err(|e| e.to_string())?;
+    *guard = Some(engine);
+    Ok(())
+}
+
+// ── model path discovery ───────────────────────────────────────────
+
+fn find_models_root() -> Result<PathBuf, String> {
     let candidates = [
-        format!("models/{}", name),
-        format!("src-tauri/models/{}", name),
+        PathBuf::from("models").join("ocr"),
+        PathBuf::from("src-tauri").join("models").join("ocr"),
     ];
     for path in &candidates {
-        if let Ok(data) = std::fs::read(path) {
-            return Ok(data);
+        if path.is_dir() {
+            return Ok(path.clone());
         }
     }
-    Err(format!("Cannot find model file: {} (tried {:?})", name, candidates))
+    Err("模型目录 models/ocr/ 未找到".into())
+}
+
+fn load_model_for_variant(variant: &str) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), String> {
+    let root = find_models_root()?;
+    let dir = root.join(variant);
+    let det = std::fs::read(dir.join("det.onnx"))
+        .map_err(|e| format!("读取 {variant}/det.onnx 失败: {e}"))?;
+    let rec = std::fs::read(dir.join("rec.onnx"))
+        .map_err(|e| format!("读取 {variant}/rec.onnx 失败: {e}"))?;
+    let keys = std::fs::read(dir.join("keys.txt"))
+        .map_err(|e| format!("读取 {variant}/keys.txt 失败: {e}"))?;
+    Ok((det, rec, keys))
 }
 
 fn find_bundled_tools_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
-    // Tauri v2: resources are in resource_dir
     let res_dir = app.path().resource_dir().ok()?;
 
-    // Try platform-specific subdirectory first (e.g. tools/windows-x86_64/)
     let arch = std::env::consts::ARCH;
     let os = std::env::consts::OS;
     let triple = format!("{os}-{arch}");
@@ -97,7 +159,6 @@ fn find_bundled_tools_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
         return Some(platform_dir);
     }
 
-    // Fallback: flat tools/ directory
     let flat_dir = res_dir.join("tools");
     if flat_dir.is_dir() {
         return Some(flat_dir);
@@ -111,14 +172,13 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let det_bytes = load_model_bytes("det.onnx")?;
-            let rec_bytes = load_model_bytes("rec.onnx")?;
-            let keys_bytes = load_model_bytes("keys.txt")?;
+            let default_variant = "v4";
+            let (det_bytes, rec_bytes, keys_bytes) =
+                load_model_for_variant(default_variant)?;
 
             let engine = ocr::OcrEngine::new(&det_bytes, &rec_bytes, &keys_bytes)
                 .map_err(|e| format!("Failed to init OCR: {}", e))?;
 
-            // ── discover bundled conversion tools ──
             let mut renderer = docx_to_image::DocxRenderer::new();
             if let Some(tools_dir) = find_bundled_tools_dir(&app.handle()) {
                 renderer = renderer.add_tool_dir(tools_dir);
@@ -130,7 +190,12 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![recognize_image, render_docx])
+        .invoke_handler(tauri::generate_handler![
+            recognize_image,
+            render_docx,
+            list_models,
+            switch_model,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

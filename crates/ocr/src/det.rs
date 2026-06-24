@@ -246,6 +246,7 @@ fn point_in_polygon(px: f32, py: f32, poly: &[[f32; 2]; 4]) -> bool {
 pub fn detect_text_regions(
     session: &mut Session,
     image: &DynamicImage,
+    output_name: &str,
 ) -> Result<Vec<TextRegion>, Box<dyn std::error::Error>> {
     let (data, padded_h, padded_w, scale_x, scale_y) = preprocess(image)?;
 
@@ -256,7 +257,7 @@ pub fn detect_text_regions(
 
     let outputs = session.run(ort::inputs!["x" => input_tensor])?;
 
-    let (output_shape, output_slice) = outputs["fetch_name_0"].try_extract_tensor::<f32>()?;
+    let (output_shape, output_slice) = outputs[output_name].try_extract_tensor::<f32>()?;
     let out_h = output_shape[2] as usize;
     let out_w = output_shape[3] as usize;
 

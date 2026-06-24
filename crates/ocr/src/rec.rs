@@ -108,6 +108,7 @@ pub fn run_recognition(
     session: &mut Session,
     data: &[f32],
     width: i64,
+    output_name: &str,
 ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
     let input_tensor = ort::value::Tensor::from_array((
         [1i64, 3, REC_HEIGHT as i64, width],
@@ -116,7 +117,7 @@ pub fn run_recognition(
 
     let outputs = session.run(ort::inputs!["x" => input_tensor])?;
 
-    let (output_shape, output_slice) = outputs["fetch_name_0"].try_extract_tensor::<f32>()?;
+    let (output_shape, output_slice) = outputs[output_name].try_extract_tensor::<f32>()?;
     let timesteps = output_shape[1] as usize;
     let num_classes = output_shape[2] as usize;
 
