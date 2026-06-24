@@ -1,0 +1,154 @@
+@import "tailwindcss";
+
+:root {
+  color: #f6f6f6;
+  background-color: #2f2f2f;
+  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 400;
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  display: flex;
+  justify-content: center;
+}
+
+#root {
+  width: 100%;
+  max-width: 1200px;
+  padding: 16px;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.toolbar button {
+  border-radius: 8px;
+  border: 1px solid transparent;
+  padding: 8px 16px;
+  font-size: 14px;
+  font-weight: 500;
+  background-color: #396cd8;
+  color: #fff;
+  cursor: pointer;
+}
+
+.toolbar button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.toolbar button:hover:not(:disabled) {
+  background-color: #2f5ab5;
+}
+
+.file-name {
+  color: #aaa;
+  font-size: 13px;
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.loading-hint {
+  text-align: center;
+  padding: 20px;
+  color: #aaa;
+  font-size: 14px;
+}
+
+.page-nav {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: center;
+}
+
+.page-nav button {
+  border-radius: 6px;
+  border: 1px solid #555;
+  padding: 4px 12px;
+  font-size: 13px;
+  background: #444;
+  color: #eee;
+  cursor: pointer;
+}
+
+.page-nav button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.page-nav span {
+  font-size: 14px;
+  color: #ccc;
+}
+
+.image-container {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+}
+
+.image-container img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+.image-container canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.results {
+  border-top: 1px solid #444;
+  padding-top: 12px;
+}
+
+.results h2 {
+  margin: 0 0 8px;
+  font-size: 15px;
+  font-weight: 600;
+  color: #ddd;
+}
+
+.result-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px solid #333;
+  gap: 12px;
+}
+
+.result-text {
+  font-size: 14px;
+  color: #eee;
+  flex: 1;
+  word-break: break-all;
+}
+
+.result-conf {
+  font-size: 12px;
+  color: #4ade80;
+  white-space: nowrap;
+}
