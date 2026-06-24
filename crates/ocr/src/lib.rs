@@ -7,6 +7,25 @@ mod rec;
 use image::DynamicImage;
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum UpscaleFilter {
+    None,
+    Triangle,
+    CatmullRom,
+    Lanczos3,
+}
+
+impl UpscaleFilter {
+    pub fn apply(&self, img: &DynamicImage) -> DynamicImage {
+        match self {
+            Self::None => img.clone(),
+            Self::Triangle => img.resize_exact(img.width() * 2, img.height() * 2, image::imageops::FilterType::Triangle),
+            Self::CatmullRom => img.resize_exact(img.width() * 2, img.height() * 2, image::imageops::FilterType::CatmullRom),
+            Self::Lanczos3 => img.resize_exact(img.width() * 2, img.height() * 2, image::imageops::FilterType::Lanczos3),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextRegion {
     pub bbox: [[f32; 2]; 4],
@@ -66,19 +85,25 @@ impl OcrEngine {
         Ok(text)
     }
 
-    pub fn recognize_all(&self, image: &DynamicImage) -> Result<Vec<OcrBlock>, Box<dyn std::error::Error>> {
-        let regions = self.detect_text_regions(image)?;
+    pub fn recognize_all(&self, image: &DynamicImage, filter: UpscaleFilter) -> Result<Vec<OcrBlock>, Box<dyn std::error::Error>> {
+        let input = filter.apply(image);
+        let scale = match filter {
+            UpscaleFilter::None => 1.0,
+            _ => 0.5,
+        };
+
+        let regions = self.detect_text_regions(&input)?;
         let mut blocks = Vec::with_capacity(regions.len());
         for region in &regions {
-            let text = self.recognize_text(image, region)?;
+            let text = self.recognize_text(&input, region)?;
             let (x, y, w, h) = bbox_to_rect(&region.bbox);
             blocks.push(OcrBlock {
                 text,
                 confidence: region.confidence,
-                x,
-                y,
-                width: w,
-                height: h,
+                x: x * scale,
+                y: y * scale,
+                width: w * scale,
+                height: h * scale,
             });
         }
         Ok(blocks)

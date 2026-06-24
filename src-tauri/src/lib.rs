@@ -16,6 +16,7 @@ pub struct PageImage {
 struct OcrState {
     engine: Mutex<Option<ocr::OcrEngine>>,
     renderer: docx_to_image::DocxRenderer,
+    upscale_filter: Mutex<ocr::UpscaleFilter>,
 }
 
 fn decode_base64(data: &str) -> Result<Vec<u8>, String> {
@@ -44,10 +45,11 @@ fn recognize_image(
     state: tauri::State<OcrState>,
     data: String,
 ) -> Result<Vec<ocr::OcrBlock>, String> {
+    let filter = *state.upscale_filter.lock().map_err(|e| e.to_string())?;
     let guard = state.engine.lock().map_err(|e| e.to_string())?;
     let engine = guard.as_ref().ok_or("OCR engine not initialized")?;
     let img = decode_base64_image(&data)?;
-    engine.recognize_all(&img).map_err(|e| e.to_string())
+    engine.recognize_all(&img, filter).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -121,6 +123,18 @@ fn switch_model(
     Ok(())
 }
 
+// ── filter command ─────────────────────────────────────────────────
+
+#[tauri::command]
+fn set_upscale_filter(
+    state: tauri::State<OcrState>,
+    filter: ocr::UpscaleFilter,
+) -> Result<(), String> {
+    let mut f = state.upscale_filter.lock().map_err(|e| e.to_string())?;
+    *f = filter;
+    Ok(())
+}
+
 // ── model path discovery ───────────────────────────────────────────
 
 fn find_models_root() -> Result<PathBuf, String> {
@@ -187,6 +201,7 @@ pub fn run() {
             app.manage(OcrState {
                 engine: Mutex::new(Some(engine)),
                 renderer,
+                upscale_filter: Mutex::new(ocr::UpscaleFilter::Lanczos3),
             });
             Ok(())
         })
@@ -195,6 +210,7 @@ pub fn run() {
             render_docx,
             list_models,
             switch_model,
+            set_upscale_filter,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
