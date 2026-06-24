@@ -11,6 +11,13 @@ export default defineConfig({
       index: "./src/main.tsx",
     },
   },
+  tools: {
+    rspack: {
+      watchOptions: {
+        ignored: ["**/target/**"],
+      },
+    },
+  },
   server: {
     port: 1420,
     strictPort: true,
