@@ -7,4 +7,5 @@ edition = "2021"
 ort = "2.0.0-rc.12"
 image = "0.25"
 imageproc = "0.27"
+geo = "0.33"
 serde = { version = "1", features = ["derive"] }

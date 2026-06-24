@@ -1,13 +1,17 @@
+use geo::algorithm::buffer::BufferStyle;
+use geo::{Area, Buffer, LineString as GeoLineString, MinimumRotatedRect, MultiPolygon, Polygon as GeoPolygon};
 use image::{DynamicImage, GrayImage, Luma};
 use imageproc::contours::find_contours;
-use imageproc::geometry::convex_hull;
+use imageproc::drawing::draw_polygon_mut;
+use imageproc::point::Point;
 use ort::session::Session;
 use crate::TextRegion;
 
 const DET_LONG_SIDE: u32 = 960;
 const DET_THRESHOLD: f32 = 0.3;
 const BOX_THRESHOLD: f32 = 0.7;
-const UNCLIP_RATIO: f32 = 1.5;
+const UNCLIP_RATIO: f32 = 2.0;
+const MAX_CANDIDATES: usize = 1000;
 const MIN_SIZE: f32 = 3.0;
 const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const STD: [f32; 3] = [0.229, 0.224, 0.225];
@@ -66,186 +70,221 @@ fn postprocess(
         }
     }
 
-    let contours = find_contours(&binary);
+    let contours = find_contours::<i32>(&binary);
     let mut regions = Vec::new();
 
-    for contour in &contours {
+    for contour in contours.iter().take(MAX_CANDIDATES) {
         if contour.points.len() < 4 {
             continue;
         }
 
-        let hull = convex_hull(contour.points.clone());
-        if hull.len() < 3 {
+        let contour_points: Vec<[f32; 2]> = contour
+            .points
+            .iter()
+            .map(|p| [p.x as f32, p.y as f32])
+            .collect();
+
+        let (mini_box, min_side) = get_mini_box(&contour_points);
+        if min_side < MIN_SIZE {
             continue;
         }
 
-        let rect = min_area_rect(&hull);
-        let cx = rect.iter().map(|p| p.x).sum::<f32>() / 4.0;
-        let cy = rect.iter().map(|p| p.y).sum::<f32>() / 4.0;
-
-        let area = polygon_area(&rect);
-        let perimeter = polygon_perimeter(&rect);
-        let d = area * UNCLIP_RATIO / perimeter.max(1.0);
-
-        let mut unclipped = [[0.0f32; 2]; 4];
-        for (k, pt) in rect.iter().enumerate() {
-            let dx = pt.x - cx;
-            let dy = pt.y - cy;
-            let len = (dx * dx + dy * dy).sqrt().max(1.0);
-            unclipped[k] = [
-                (pt.x + dx / len * d).max(0.0).min(out_w as f32),
-                (pt.y + dy / len * d).max(0.0).min(out_h as f32),
-            ];
-        }
-
-        let box_w = (unclipped[0][0] - unclipped[1][0]).abs().max(
-            (unclipped[3][0] - unclipped[2][0]).abs()
-        );
-        let box_h = (unclipped[0][1] - unclipped[3][1]).abs().max(
-            (unclipped[1][1] - unclipped[2][1]).abs()
-        );
-
-        if box_w < MIN_SIZE || box_h < MIN_SIZE {
-            continue;
-        }
-
-        let prob_val = average_probability(prob_data, out_w, out_h, &unclipped);
+        let prob_val = average_probability(prob_data, out_w, out_h, &mini_box);
         if prob_val < BOX_THRESHOLD {
+            continue;
+        }
+
+        let Some(expanded) = unclip_box(&mini_box, UNCLIP_RATIO) else {
+            continue;
+        };
+        let (expanded_box, min_side) = get_mini_box(&expanded);
+        if min_side < MIN_SIZE + 2.0 {
             continue;
         }
 
         let inv_sx = 1.0 / scale_x;
         let inv_sy = 1.0 / scale_y;
-        let mut valid = true;
-        let bbox = unclipped.map(|p| {
-            let x = p[0] * inv_sx;
-            let y = p[1] * inv_sy;
-            if x < 0.0 || x >= orig_w as f32 || y < 0.0 || y >= orig_h as f32 {
-                valid = false;
-            }
+        let bbox = expanded_box.map(|p| {
+            let x = (p[0] * inv_sx)
+                .round()
+                .clamp(0.0, orig_w.saturating_sub(1) as f32);
+            let y = (p[1] * inv_sy)
+                .round()
+                .clamp(0.0, orig_h.saturating_sub(1) as f32);
             [x, y]
         });
-
-        if !valid {
+        let bbox = sort_box_points_like_paddle(bbox);
+        let rect_width = point_dist(bbox[0], bbox[1]);
+        let rect_height = point_dist(bbox[0], bbox[3]);
+        if rect_width <= MIN_SIZE || rect_height <= MIN_SIZE {
             continue;
         }
 
         regions.push(TextRegion { bbox, confidence: prob_val });
     }
 
-    regions.sort_by(|a, b| {
-        let ay = a.bbox.iter().map(|p| p[1]).sum::<f32>();
-        let by = b.bbox.iter().map(|p| p[1]).sum::<f32>();
-        ay.partial_cmp(&by).unwrap()
-    });
-
     regions
 }
 
-fn min_area_rect(points: &[imageproc::point::Point<i32>]) -> [imageproc::point::Point<f32>; 4] {
-    let n = points.len();
-    if n < 3 {
-        return [imageproc::point::Point::new(0.0, 0.0); 4];
-    }
-
-    let mut min_area = f32::MAX;
-    let mut best = [imageproc::point::Point::new(0.0, 0.0); 4];
-
-    for i in 0..n {
-        let j = (i + 1) % n;
-        let dx = (points[j].x - points[i].x) as f32;
-        let dy = (points[j].y - points[i].y) as f32;
-        let len = (dx * dx + dy * dy).sqrt();
-        if len < 1.0 {
-            continue;
-        }
-        let cos_a = dx / len;
-        let sin_a = dy / len;
-
-        let (mut min_proj, mut max_proj) = (f32::MAX, f32::MIN);
-        let (mut min_perp, mut max_perp) = (f32::MAX, f32::MIN);
-
-        for p in points {
-            let px = p.x as f32;
-            let py = p.y as f32;
-            let proj = px * cos_a + py * sin_a;
-            let perp = -px * sin_a + py * cos_a;
-            if proj < min_proj { min_proj = proj; }
-            if proj > max_proj { max_proj = proj; }
-            if perp < min_perp { min_perp = perp; }
-            if perp > max_perp { max_perp = perp; }
-        }
-
-        let area = (max_proj - min_proj) * (max_perp - min_perp);
-        if area < min_area {
-            min_area = area;
-            best = [
-                imageproc::point::Point::new(min_proj * cos_a - min_perp * sin_a, min_proj * sin_a + min_perp * cos_a),
-                imageproc::point::Point::new(max_proj * cos_a - min_perp * sin_a, max_proj * sin_a + min_perp * cos_a),
-                imageproc::point::Point::new(max_proj * cos_a - max_perp * sin_a, max_proj * sin_a + max_perp * cos_a),
-                imageproc::point::Point::new(min_proj * cos_a - max_perp * sin_a, min_proj * sin_a + max_perp * cos_a),
-            ];
-        }
-    }
-    best
+fn get_mini_box(points: &[[f32; 2]]) -> ([[f32; 2]; 4], f32) {
+    let rect = minimum_rotated_box(points).unwrap_or([[0.0, 0.0]; 4]);
+    let side1 = point_dist(rect[0], rect[1]);
+    let side2 = point_dist(rect[1], rect[2]);
+    (rect, side1.min(side2))
 }
 
-fn polygon_area(poly: &[imageproc::point::Point<f32>; 4]) -> f32 {
+fn polygon_area(poly: &[[f32; 2]]) -> f32 {
     let mut area = 0.0;
-    for i in 0..4 {
-        let j = (i + 1) % 4;
-        area += poly[i].x * poly[j].y - poly[j].x * poly[i].y;
+    for i in 0..poly.len() {
+        let j = (i + 1) % poly.len();
+        area += poly[i][0] * poly[j][1] - poly[j][0] * poly[i][1];
     }
     area.abs() / 2.0
 }
 
-fn polygon_perimeter(poly: &[imageproc::point::Point<f32>; 4]) -> f32 {
+fn polygon_perimeter(poly: &[[f32; 2]]) -> f32 {
     let mut perim = 0.0;
-    for i in 0..4 {
-        let j = (i + 1) % 4;
-        let dx = poly[i].x - poly[j].x;
-        let dy = poly[i].y - poly[j].y;
+    for i in 0..poly.len() {
+        let j = (i + 1) % poly.len();
+        let dx = poly[i][0] - poly[j][0];
+        let dy = poly[i][1] - poly[j][1];
         perim += (dx * dx + dy * dy).sqrt();
     }
     perim
 }
 
+fn minimum_rotated_box(points: &[[f32; 2]]) -> Option<[[f32; 2]; 4]> {
+    if points.len() < 3 {
+        return None;
+    }
+    let line = GeoLineString::from(
+        points
+            .iter()
+            .map(|p| (p[0] as f64, p[1] as f64))
+            .collect::<Vec<_>>(),
+    );
+    let polygon = line.minimum_rotated_rect()?;
+    polygon_to_box(&polygon)
+}
+
+fn polygon_to_box(poly: &GeoPolygon<f64>) -> Option<[[f32; 2]; 4]> {
+    let coords = &poly.exterior().0;
+    if coords.len() < 4 {
+        return None;
+    }
+    let mut rect = [[0.0; 2]; 4];
+    for (idx, coord) in coords.iter().take(4).enumerate() {
+        rect[idx] = [coord.x as f32, coord.y as f32];
+    }
+    Some(sort_box_points_like_paddle(rect))
+}
+
+fn unclip_box(poly: &[[f32; 2]; 4], ratio: f32) -> Option<Vec<[f32; 2]>> {
+    let area = polygon_area(poly);
+    let perimeter = polygon_perimeter(poly);
+    let distance = area * ratio / perimeter.max(1.0);
+    if distance <= 0.0 {
+        return None;
+    }
+
+    let ring = GeoLineString::from(vec![
+        (poly[0][0] as f64, poly[0][1] as f64),
+        (poly[1][0] as f64, poly[1][1] as f64),
+        (poly[2][0] as f64, poly[2][1] as f64),
+        (poly[3][0] as f64, poly[3][1] as f64),
+        (poly[0][0] as f64, poly[0][1] as f64),
+    ]);
+    let polygon = GeoPolygon::new(ring, Vec::new());
+    let style = BufferStyle::new(distance as f64);
+    let buffered: MultiPolygon<f64> = polygon.buffer_with_style(style);
+    let largest = buffered
+        .0
+        .iter()
+        .max_by(|a, b| a.unsigned_area().partial_cmp(&b.unsigned_area()).unwrap())?;
+    let rect = largest.minimum_rotated_rect()?;
+    let box_points = polygon_to_box(&rect)?;
+    Some(box_points.into_iter().collect())
+}
+
+fn point_dist(a: [f32; 2], b: [f32; 2]) -> f32 {
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    (dx * dx + dy * dy).sqrt()
+}
+
+fn sort_box_points_like_paddle(mut pts: [[f32; 2]; 4]) -> [[f32; 2]; 4] {
+    pts.sort_by(|a, b| a[0].total_cmp(&b[0]));
+
+    let (left0, left1) = (pts[0], pts[1]);
+    let (right0, right1) = (pts[2], pts[3]);
+
+    let (top_left, bottom_left) = if left1[1] > left0[1] {
+        (left0, left1)
+    } else {
+        (left1, left0)
+    };
+    let (top_right, bottom_right) = if right1[1] > right0[1] {
+        (right0, right1)
+    } else {
+        (right1, right0)
+    };
+
+    [top_left, top_right, bottom_right, bottom_left]
+}
+
 fn average_probability(prob_data: &[f32], w: usize, h: usize, poly: &[[f32; 2]; 4]) -> f32 {
-    let min_x = (poly.iter().map(|p| p[0] as isize).min().unwrap_or(0)).max(0);
-    let max_x = (poly.iter().map(|p| p[0] as isize).max().unwrap_or(0)).min(w as isize - 1);
-    let min_y = (poly.iter().map(|p| p[1] as isize).min().unwrap_or(0)).max(0);
-    let max_y = (poly.iter().map(|p| p[1] as isize).max().unwrap_or(0)).min(h as isize - 1);
+    let min_x = poly
+        .iter()
+        .map(|p| p[0].floor() as isize)
+        .min()
+        .unwrap_or(0)
+        .clamp(0, w as isize - 1) as usize;
+    let max_x = poly
+        .iter()
+        .map(|p| p[0].ceil() as isize)
+        .max()
+        .unwrap_or(0)
+        .clamp(0, w as isize - 1) as usize;
+    let min_y = poly
+        .iter()
+        .map(|p| p[1].floor() as isize)
+        .min()
+        .unwrap_or(0)
+        .clamp(0, h as isize - 1) as usize;
+    let max_y = poly
+        .iter()
+        .map(|p| p[1].ceil() as isize)
+        .max()
+        .unwrap_or(0)
+        .clamp(0, h as isize - 1) as usize;
+
+    let local_poly = poly.map(|p| [p[0] - min_x as f32, p[1] - min_y as f32]);
+    let draw_poly = local_poly.map(|p| Point::new(p[0] as i32, p[1] as i32));
+    let mut mask = GrayImage::new((max_x - min_x + 1) as u32, (max_y - min_y + 1) as u32);
+    draw_polygon_mut(&mut mask, &draw_poly, Luma([1u8]));
 
     let mut sum = 0.0f64;
-    let mut count = 0;
+    let mut count = 0usize;
     for y in min_y..=max_y {
         for x in min_x..=max_x {
-            if point_in_polygon(x as f32, y as f32, poly) {
-                sum += prob_data[(y * w as isize + x) as usize] as f64;
+            if mask.get_pixel((x - min_x) as u32, (y - min_y) as u32)[0] != 0 {
+                sum += prob_data[y * w + x] as f64;
                 count += 1;
             }
         }
     }
-    if count > 0 { (sum / count as f64) as f32 } else { 0.0 }
-}
 
-fn point_in_polygon(px: f32, py: f32, poly: &[[f32; 2]; 4]) -> bool {
-    let mut inside = false;
-    let mut j = 3;
-    for i in 0..4 {
-        if ((poly[i][1] > py) != (poly[j][1] > py))
-            && (px < (poly[j][0] - poly[i][0]) * (py - poly[i][1]) / (poly[j][1] - poly[i][1]) + poly[i][0])
-        {
-            inside = !inside;
-        }
-        j = i;
+    if count == 0 {
+        0.0
+    } else {
+        (sum / count as f64) as f32
     }
-    inside
 }
 
 pub fn detect_text_regions(
     session: &mut Session,
     image: &DynamicImage,
+    input_name: &str,
     output_name: &str,
 ) -> Result<Vec<TextRegion>, Box<dyn std::error::Error>> {
     let (data, padded_h, padded_w, scale_x, scale_y) = preprocess(image)?;
@@ -255,7 +294,7 @@ pub fn detect_text_regions(
         data,
     ))?;
 
-    let outputs = session.run(ort::inputs!["x" => input_tensor])?;
+    let outputs = session.run(ort::inputs![input_name => input_tensor])?;
 
     let (output_shape, output_slice) = outputs[output_name].try_extract_tensor::<f32>()?;
     let out_h = output_shape[2] as usize;

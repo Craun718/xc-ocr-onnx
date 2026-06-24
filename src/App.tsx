@@ -18,7 +18,6 @@ interface PageImage {
   image_data: string;
 }
 
-type UpscaleFilter = "None" | "Triangle" | "CatmullRom" | "Lanczos3";
 
 function App() {
   const [imageDataUrl, setImageDataUrl] = useState<string | null>(null);
@@ -32,9 +31,6 @@ function App() {
   // model switching
   const [models, setModels] = useState<string[]>([]);
   const [currentModel, setCurrentModel] = useState("");
-
-  // upscale filter
-  const [filter, setFilter] = useState<UpscaleFilter>("Lanczos3");
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
@@ -55,16 +51,6 @@ function App() {
       await invoke("switch_model", { variant });
     } catch (err) {
       alert("切换模型失败: " + err);
-    }
-  };
-
-  const handleFilterChange = async (f: UpscaleFilter) => {
-    setFilter(f);
-    setBlocks([]);
-    try {
-      await invoke("set_upscale_filter", { filter: f });
-    } catch (err) {
-      alert("设置滤波器失败: " + err);
     }
   };
 
@@ -166,13 +152,6 @@ function App() {
     }
   };
 
-  const FILTERS: { value: UpscaleFilter; label: string }[] = [
-    { value: "None", label: "无" },
-    { value: "Triangle", label: "Triangle (双线性)" },
-    { value: "CatmullRom", label: "CatmullRom" },
-    { value: "Lanczos3", label: "Lanczos3 (推荐)" },
-  ];
-
   return (
     <div className="app">
       <input
@@ -206,17 +185,6 @@ function App() {
           </div>
         )}
 
-        <div className="model-selector">
-          <label>放大：</label>
-          <select
-            value={filter}
-            onChange={(e) => handleFilterChange(e.target.value as UpscaleFilter)}
-          >
-            {FILTERS.map((f) => (
-              <option key={f.value} value={f.value}>{f.label}</option>
-            ))}
-          </select>
-        </div>
       </div>
 
       {loading && <div className="loading-hint">处理中，请稍候...</div>}
