@@ -999,13 +999,12 @@ dependencies = [
 
 [[package]]
 name = "docx-to-image"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
- "ab_glyph",
  "docx-rs",
  "image",
- "imageproc",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
 ]
 

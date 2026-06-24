@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::Manager;
 
@@ -83,6 +84,28 @@ fn load_model_bytes(name: &str) -> Result<Vec<u8>, String> {
     Err(format!("Cannot find model file: {} (tried {:?})", name, candidates))
 }
 
+fn find_bundled_tools_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
+    // Tauri v2: resources are in resource_dir
+    let res_dir = app.path().resource_dir().ok()?;
+
+    // Try platform-specific subdirectory first (e.g. tools/windows-x86_64/)
+    let arch = std::env::consts::ARCH;
+    let os = std::env::consts::OS;
+    let triple = format!("{os}-{arch}");
+    let platform_dir = res_dir.join("tools").join(&triple);
+    if platform_dir.is_dir() {
+        return Some(platform_dir);
+    }
+
+    // Fallback: flat tools/ directory
+    let flat_dir = res_dir.join("tools");
+    if flat_dir.is_dir() {
+        return Some(flat_dir);
+    }
+
+    None
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -95,9 +118,15 @@ pub fn run() {
             let engine = ocr::OcrEngine::new(&det_bytes, &rec_bytes, &keys_bytes)
                 .map_err(|e| format!("Failed to init OCR: {}", e))?;
 
+            // ── discover bundled conversion tools ──
+            let mut renderer = docx_to_image::DocxRenderer::new();
+            if let Some(tools_dir) = find_bundled_tools_dir(&app.handle()) {
+                renderer = renderer.add_tool_dir(tools_dir);
+            }
+
             app.manage(OcrState {
                 engine: Mutex::new(Some(engine)),
-                renderer: docx_to_image::DocxRenderer::new(),
+                renderer,
             });
             Ok(())
         })
