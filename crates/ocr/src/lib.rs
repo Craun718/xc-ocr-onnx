@@ -63,6 +63,27 @@ impl OcrEngine {
         let keys_str = std::str::from_utf8(keys_data)?;
         let keys: Vec<String> = keys_str.lines().map(|s| s.to_string()).collect();
 
+        // debug: validate keys vs model output
+        let model_classes = rec_session.outputs()[0]
+            .dtype().tensor_shape()
+            .and_then(|s| s.last())
+            .copied()
+            .unwrap_or(0) as usize;
+        eprintln!(
+            "[ocr] keys: {} lines, model output classes: {} (blank + {} chars)",
+            keys.len(),
+            model_classes,
+            model_classes.saturating_sub(1),
+        );
+        if keys.len() + 1 != model_classes {
+            eprintln!(
+                "[ocr] WARNING: keys({}) + 1(blank) = {} != model_classes({})",
+                keys.len(),
+                keys.len() + 1,
+                model_classes,
+            );
+        }
+
         Ok(Self {
             det_session: Mutex::new(det_session),
             rec_session: Mutex::new(rec_session),
