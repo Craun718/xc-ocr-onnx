@@ -21,22 +21,10 @@ tools/
 └── README.md
 ```
 
-## 方案一：LibreOffice（推荐，质量最好）
 
-系统安装 LibreOffice 即可，无需额外配置：
-```
-# Windows
-winget install LibreOffice
+## 使用工具
 
-# Linux (包括 ARM)
-sudo apt install libreoffice
-```
-
-软件会自动在 PATH 中找到 `soffice`。
-
-## 方案二：轻量工具包
-
-如果不想安装 LibreOffice，可自行下载以下工具放入对应目录：
+下载以下工具放入对应目录：
 
 | 工具 | 下载地址 | 作用 |
 |---|---|---|

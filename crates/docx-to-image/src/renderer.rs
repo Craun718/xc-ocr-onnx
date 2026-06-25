@@ -11,7 +11,7 @@ const DEFAULT_DPI: u32 = 200;
 pub struct DocxRenderer {
     dpi: u32,
     tool_search_dirs: Vec<PathBuf>,
-    soffice_path: Option<PathBuf>,
+
     gs_path: Option<PathBuf>,
     pandoc_path: Option<PathBuf>,
     wkhtmltoimage_path: Option<PathBuf>,
@@ -22,7 +22,6 @@ impl DocxRenderer {
         Self {
             dpi: DEFAULT_DPI,
             tool_search_dirs: Vec::new(),
-            soffice_path: None,
             gs_path: None,
             pandoc_path: None,
             wkhtmltoimage_path: None,
@@ -36,11 +35,6 @@ impl DocxRenderer {
 
     pub fn add_tool_dir<P: Into<PathBuf>>(mut self, dir: P) -> Self {
         self.tool_search_dirs.push(dir.into());
-        self
-    }
-
-    pub fn set_soffice<P: Into<PathBuf>>(mut self, path: P) -> Self {
-        self.soffice_path = Some(path.into());
         self
     }
 
@@ -67,39 +61,12 @@ impl DocxRenderer {
         // detect page width from DOCX (TWIPs → pixels)
         let page_w_px = detect_page_width(docx_bytes, self.dpi);
 
-        let soffice = self.find_tool("soffice", &self.soffice_path);
         let gs = self.find_gs();
         let pandoc = self.find_tool("pandoc", &self.pandoc_path);
         let wkhtml = self.find_tool("wkhtmltoimage", &self.wkhtmltoimage_path);
         let mut last_err = None;
 
-        // Priority 1: LibreOffice + Ghostscript — best quality
-        if let Some(soffice) = &soffice {
-            let pdf_path = tmp.path().join("input.pdf");
-            match self.run_soffice_to_pdf(soffice, &docx_path, &pdf_path) {
-                Ok(()) => {
-                    if let Some(gs) = &gs {
-                        match self.run_gs_to_png(gs, &pdf_path, tmp.path()) {
-                            Ok(pages) => return Ok(pages),
-                            Err(e) => last_err = Some(e),
-                        }
-                    }
-                    if let Ok(Some(pages)) = try_mutool(&pdf_path, tmp.path()) {
-                        if !pages.is_empty() {
-                            return Ok(pages);
-                        }
-                    }
-                    if let Ok(Some(pages)) = try_pdftoppm(&pdf_path, tmp.path()) {
-                        if !pages.is_empty() {
-                            return Ok(pages);
-                        }
-                    }
-                }
-                Err(e) => last_err = Some(e),
-            }
-        }
-
-        // Priority 2: Pandoc + wkhtmltoimage — decent quality, lighter bundle
+        // Priority 1: Pandoc + wkhtmltoimage — decent quality, lighter bundle
         if let (Some(pandoc), Some(wkhtml)) = (&pandoc, &wkhtml) {
             match self.run_pandoc_wkhtml(pandoc, wkhtml, &docx_path, tmp.path(), page_w_px) {
                 Ok(pages) => return Ok(pages),
@@ -107,14 +74,13 @@ impl DocxRenderer {
             }
         }
 
-        // Priority 3: Pandoc → HTML → PDF via wkhtmltopdf → PNG via gs
+        // Priority 2: Pandoc → HTML → PDF via wkhtmltopdf → PNG via gs
         if let Some(pandoc) = &pandoc {
             if let Some(gs) = &gs {
                 let wkhtmltopdf = self.find_tool("wkhtmltopdf", &None);
                 if let Some(wkpdf) = wkhtmltopdf {
-                    match self.run_pandoc_wkhtmltopdf_gs(
-                        pandoc, &wkpdf, gs, &docx_path, tmp.path(),
-                    ) {
+                    match self.run_pandoc_wkhtmltopdf_gs(pandoc, &wkpdf, gs, &docx_path, tmp.path())
+                    {
                         Ok(pages) => return Ok(pages),
                         Err(e) => last_err = Some(e),
                     }
@@ -128,13 +94,7 @@ impl DocxRenderer {
                  • 系统 PATH 环境变量中\n\
                  • src-tauri/tools/<平台架构>/ 目录下\n\
                  \n\
-                 需要安装的工具（任选一种方案）：\n\
-                 \n\
-                 方案一（推荐，质量最好）：安装 LibreOffice\n\
-                   Windows: winget install LibreOffice\n\
-                   Linux:   sudo apt install libreoffice\n\
-                 \n\
-                 方案二（安装包较小）：将 pandoc + wkhtmltopdf + Ghostscript 放入 tools/ 目录\n\
+                 需要安装的工具：将 pandoc + wkhtmltopdf + Ghostscript 放入 tools/ 目录\n\
                  运行 scripts/download-tools.ps1 自动下载"
                     .into(),
             )
@@ -195,41 +155,6 @@ impl DocxRenderer {
             }
         }
         None
-    }
-
-    // ─── soffice path ─────────────────────────────────────────────
-
-    fn run_soffice_to_pdf(
-        &self,
-        soffice: &Path,
-        docx_path: &Path,
-        pdf_path: &Path,
-    ) -> Result<(), DocxToImageError> {
-        let out_dir = pdf_path.parent().unwrap();
-        let output = Command::new(soffice)
-            .arg("--headless")
-            .arg("--convert-to")
-            .arg("pdf")
-            .arg("--outdir")
-            .arg(out_dir)
-            .arg(docx_path)
-            .output()?;
-
-        if !output.status.success() {
-            return Err(DocxToImageError::CommandFailed {
-                cmd: format!("{} --headless --convert-to pdf", soffice.display()),
-                code: output.status.code().unwrap_or(-1),
-                stderr: String::from_utf8_lossy(&output.stderr).into(),
-            });
-        }
-        if !pdf_path.exists() {
-            return Err(DocxToImageError::CommandFailed {
-                cmd: "soffice --headless --convert-to pdf".into(),
-                code: -1,
-                stderr: "未生成 PDF 文件".into(),
-            });
-        }
-        Ok(())
     }
 
     // ─── ghostscript path ─────────────────────────────────────────
@@ -365,9 +290,7 @@ const DEFAULT_TWIP_W: u32 = 11906; // A4 default
 fn detect_page_width(docx_bytes: &[u8], dpi: u32) -> u32 {
     let twip_w = docx_rs::read_docx(docx_bytes)
         .ok()
-        .and_then(|docx| {
-            serde_json::to_value(&docx.document.section_property.page_size).ok()
-        })
+        .and_then(|docx| serde_json::to_value(&docx.document.section_property.page_size).ok())
         .and_then(|v| v.get("w").and_then(|w| w.as_u64()).map(|w| w as u32))
         .unwrap_or(DEFAULT_TWIP_W);
 
@@ -385,37 +308,6 @@ fn tool_in_path(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn try_mutool(pdf_path: &Path, out_dir: &Path) -> Result<Option<Vec<RgbaImage>>, DocxToImageError> {
-    if !tool_in_path("mutool") {
-        return Ok(None);
-    }
-    let pattern = out_dir.join("page-%d.png");
-    let out = Command::new("mutool")
-        .arg("draw")
-        .arg("-o")
-        .arg(&pattern)
-        .arg(pdf_path)
-        .output()?;
-    if !out.status.success() {
-        return Ok(None);
-    }
-    load_png_pages(out_dir).map(Some)
-}
-
-fn try_pdftoppm(pdf_path: &Path, out_dir: &Path) -> Result<Option<Vec<RgbaImage>>, DocxToImageError> {
-    if !tool_in_path("pdftoppm") {
-        return Ok(None);
-    }
-    let out = Command::new("pdftoppm")
-        .arg("-png")
-        .arg(pdf_path)
-        .arg(out_dir.join("page"))
-        .output()?;
-    if !out.status.success() {
-        return Ok(None);
-    }
-    load_png_pages(out_dir).map(Some)
-}
 
 fn load_png_pages(dir: &Path) -> Result<Vec<RgbaImage>, DocxToImageError> {
     let mut pages: Vec<(usize, RgbaImage)> = Vec::new();

@@ -9,24 +9,60 @@ fn main() {
     let has_wkhtml = tools_dir.join("wkhtmltoimage").exists() || tools_dir.join("wkhtmltoimage.exe").exists();
 
     if !has_pandoc || !has_wkhtml {
-        println!("cargo:warning=");
-        println!("cargo:warning=⚠  Bundled tools not found for target: {target}");
-        println!("cargo:warning=   Expected directory: src-tauri/{:?}", tools_dir);
-        println!("cargo:warning=   Needed: pandoc{} and wkhtmltoimage{}",
-            if cfg!(windows) { ".exe" } else { "" },
-            if cfg!(windows) { ".exe" } else { "" });
-        println!("cargo:warning=");
-        println!("cargo:warning=   Run the download script to fetch them:");
-        println!("cargo:warning=     scripts/download-tools.ps1");
-        println!("cargo:warning=");
-        println!("cargo:warning=   Or manually place binaries in: src-tauri/{}", tools_dir.display());
-        println!("cargo:warning=");
-        println!("cargo:warning=   NOTE: The app will still compile, but DOCX conversion");
-        println!("cargo:warning=   will fail at runtime without these tools.");
-        println!("cargo:warning=");
+        // Try auto-download
+        let repo_root = manifest_dir.parent().unwrap_or(manifest_dir);
+        let download_script = repo_root.join("scripts").join("download-tools.ps1");
+
+        if download_script.exists() {
+            println!("cargo:warning=");
+            println!("cargo:warning=Bundled tools not found, attempting auto-download...");
+
+            let result = std::process::Command::new("powershell")
+                .arg("-ExecutionPolicy")
+                .arg("Bypass")
+                .arg("-File")
+                .arg(&download_script)
+                .arg("-TargetDir")
+                .arg(&tools_dir)
+                .arg("-Platform")
+                .arg(&triple)
+                .status();
+
+            match result {
+                Ok(status) if status.success() => {
+                    println!("cargo:warning=Tools downloaded successfully to {}", tools_dir.display());
+                    println!("cargo:warning=");
+                }
+                Ok(status) => {
+                    println!("cargo:warning=Download script exited with code {}", status.code().unwrap_or(-1));
+                    print_manual_instructions(&target, &tools_dir);
+                }
+                Err(e) => {
+                    println!("cargo:warning=Failed to run download script: {e}");
+                    print_manual_instructions(&target, &tools_dir);
+                }
+            }
+        } else {
+            print_manual_instructions(&target, &tools_dir);
+        }
     }
 
     tauri_build::build()
+}
+
+fn print_manual_instructions(target: &str, tools_dir: &std::path::Path) {
+    println!("cargo:warning=");
+    println!("cargo:warning=Auto-download failed. Please place tools manually:");
+    println!("cargo:warning=  Target: {target}");
+    println!("cargo:warning=  Directory: {}", tools_dir.display());
+    println!("cargo:warning=  Needed: pandoc{} and wkhtmltoimage{}",
+        if cfg!(windows) { ".exe" } else { "" },
+        if cfg!(windows) { ".exe" } else { "" });
+    println!("cargo:warning=");
+    println!("cargo:warning=  Windows: Run scripts/download-tools.ps1");
+    println!("cargo:warning=  Linux:   sudo apt install pandoc wkhtmltopdf ghostscript");
+    println!("cargo:warning=  macOS:   brew install pandoc wkhtmltopdf ghostscript");
+    println!("cargo:warning=");
 }
 
 /// Convert a Rust target triple like `x86_64-pc-windows-msvc` to
