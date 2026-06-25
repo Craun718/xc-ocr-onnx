@@ -31,3 +31,4 @@ tools/*
 src-tauri/tools/*
 tools/*
 
+*/~$*.docx
