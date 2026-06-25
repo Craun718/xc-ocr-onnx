@@ -160,19 +160,33 @@ fn load_model_for_variant(app: &tauri::AppHandle, variant: &str) -> Result<(Vec<
 }
 
 fn find_bundled_tools_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
-    let res_dir = app.path().resource_dir().ok()?;
-
     let arch = std::env::consts::ARCH;
     let os = std::env::consts::OS;
     let triple = format!("{os}-{arch}");
-    let platform_dir = res_dir.join("tools").join(&triple);
-    if platform_dir.is_dir() {
-        return Some(platform_dir);
+
+    // 1. Resource dir (used in production bundle)
+    if let Ok(res_dir) = app.path().resource_dir() {
+        let platform_dir = res_dir.join("tools").join(&triple);
+        if platform_dir.is_dir() {
+            return Some(platform_dir);
+        }
+        let flat_dir = res_dir.join("tools");
+        if flat_dir.is_dir() {
+            return Some(flat_dir);
+        }
     }
 
-    let flat_dir = res_dir.join("tools");
-    if flat_dir.is_dir() {
-        return Some(flat_dir);
+    // 2. Dev-mode: search under repo root `tools/` (outside src-tauri/,
+    //    so Tauri's file watcher never triggers a rebuild loop)
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir.parent().unwrap_or(&manifest_dir);
+    let dev_platform = repo_root.join("tools").join(&triple);
+    if dev_platform.is_dir() {
+        return Some(dev_platform);
+    }
+    let dev_flat = repo_root.join("tools");
+    if dev_flat.is_dir() {
+        return Some(dev_flat);
     }
 
     None

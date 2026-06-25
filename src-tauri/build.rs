@@ -4,64 +4,84 @@ fn main() {
     let triple = target_to_triple_dir(&target);
 
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let tools_dir = manifest_dir.join("tools").join(&triple);
-    let has_pandoc = tools_dir.join("pandoc").exists() || tools_dir.join("pandoc.exe").exists();
-    let has_wkhtml = tools_dir.join("wkhtmltoimage").exists() || tools_dir.join("wkhtmltoimage.exe").exists();
+    let repo_root = manifest_dir.parent().unwrap_or(manifest_dir);
+    // Store tools under project root `tools/` (outside `src-tauri/`)
+    // so Tauri's dev file watcher doesn't trigger a rebuild loop.
+    let tools_dir = repo_root.join("tools").join(&triple);
 
-    if !has_pandoc || !has_wkhtml {
-        // Try auto-download
-        let repo_root = manifest_dir.parent().unwrap_or(manifest_dir);
-        let download_script = repo_root.join("scripts").join("download-tools.ps1");
+    let has_pandoc = has_tool(&tools_dir, "pandoc");
+    let has_wkhtml = has_tool(&tools_dir, "wkhtmltopdf");
+    let has_gs = has_tool(&tools_dir, ghostscript_name());
 
-        if download_script.exists() {
-            println!("cargo:warning=");
-            println!("cargo:warning=Bundled tools not found, attempting auto-download...");
+    if has_pandoc && has_wkhtml && has_gs {
+        tauri_build::build();
+        return;
+    }
 
-            let result = std::process::Command::new("powershell")
-                .arg("-ExecutionPolicy")
-                .arg("Bypass")
-                .arg("-File")
-                .arg(&download_script)
-                .arg("-TargetDir")
-                .arg(&tools_dir)
-                .arg("-Platform")
-                .arg(&triple)
-                .status();
+    // Try auto-download if any tool is missing
+    let download_script = repo_root.join("scripts").join("download-tools.ps1");
 
-            match result {
-                Ok(status) if status.success() => {
-                    println!("cargo:warning=Tools downloaded successfully to {}", tools_dir.display());
-                    println!("cargo:warning=");
-                }
-                Ok(status) => {
-                    println!("cargo:warning=Download script exited with code {}", status.code().unwrap_or(-1));
-                    print_manual_instructions(&target, &tools_dir);
-                }
-                Err(e) => {
-                    println!("cargo:warning=Failed to run download script: {e}");
-                    print_manual_instructions(&target, &tools_dir);
-                }
+    if download_script.exists() {
+        println!("cargo:warning=");
+        println!("cargo:warning=Bundled tools not found, attempting auto-download to {} ...", tools_dir.display());
+        println!("cargo:warning=  missing: {}{}{}",
+            if has_pandoc { "" } else { " pandoc" },
+            if has_wkhtml { "" } else { " wkhtmltopdf" },
+            if has_gs { "" } else { " ghostscript" },
+        );
+
+        let result = std::process::Command::new("powershell")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-File")
+            .arg(&download_script)
+            .arg("-TargetDir")
+            .arg(&tools_dir)
+            .arg("-Platform")
+            .arg(&triple)
+            .status();
+
+        match result {
+            Ok(status) if status.success() => {
+                println!("cargo:warning=Tools downloaded successfully to {}", tools_dir.display());
+                println!("cargo:warning=");
             }
-        } else {
-            print_manual_instructions(&target, &tools_dir);
+            Ok(status) => {
+                println!("cargo:warning=Download script exited with code {}", status.code().unwrap_or(-1));
+                print_manual_instructions(&triple, &tools_dir);
+            }
+            Err(e) => {
+                println!("cargo:warning=Failed to run download script: {e}");
+                print_manual_instructions(&triple, &tools_dir);
+            }
         }
+    } else {
+        print_manual_instructions(&triple, &tools_dir);
     }
 
     tauri_build::build()
 }
 
-fn print_manual_instructions(target: &str, tools_dir: &std::path::Path) {
+fn has_tool(dir: &std::path::Path, name: &str) -> bool {
+    let exe = format!("{}.exe", name);
+    dir.join(name).exists() || dir.join(&exe).exists()
+}
+
+fn ghostscript_name() -> &'static str {
+    if cfg!(windows) { "gswin64c" } else { "gs" }
+}
+
+fn print_manual_instructions(platform: &str, tools_dir: &std::path::Path) {
     println!("cargo:warning=");
     println!("cargo:warning=Auto-download failed. Please place tools manually:");
-    println!("cargo:warning=  Target: {target}");
+    println!("cargo:warning=  Platform: {platform}");
     println!("cargo:warning=  Directory: {}", tools_dir.display());
-    println!("cargo:warning=  Needed: pandoc{} and wkhtmltoimage{}",
+    println!("cargo:warning=  Needed: pandoc{}, wkhtmltopdf{}, and ghostscript{}",
         if cfg!(windows) { ".exe" } else { "" },
-        if cfg!(windows) { ".exe" } else { "" });
+        if cfg!(windows) { ".exe" } else { "" },
+        if cfg!(windows) { " (gswin64c.exe)" } else { "" });
     println!("cargo:warning=");
-    println!("cargo:warning=  Windows: Run scripts/download-tools.ps1");
-    println!("cargo:warning=  Linux:   sudo apt install pandoc wkhtmltopdf ghostscript");
-    println!("cargo:warning=  macOS:   brew install pandoc wkhtmltopdf ghostscript");
+    println!("cargo:warning=  Run: scripts/download-tools.ps1");
     println!("cargo:warning=");
 }
 

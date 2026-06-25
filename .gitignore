@@ -24,3 +24,6 @@ dist-ssr
 *.sw?
 
 target/*
+tools/*
+!tools/.gitignore
+!tools/README.md

@@ -31,7 +31,6 @@ pub struct DocxRenderer {
 
     gs_path: Option<PathBuf>,
     pandoc_path: Option<PathBuf>,
-    wkhtmltoimage_path: Option<PathBuf>,
 }
 
 impl DocxRenderer {
@@ -41,7 +40,6 @@ impl DocxRenderer {
             tool_search_dirs: Vec::new(),
             gs_path: None,
             pandoc_path: None,
-            wkhtmltoimage_path: None,
         }
     }
 
@@ -65,11 +63,6 @@ impl DocxRenderer {
         self
     }
 
-    pub fn set_wkhtmltoimage<P: Into<PathBuf>>(mut self, path: P) -> Self {
-        self.wkhtmltoimage_path = Some(path.into());
-        self
-    }
-
     /// Detect page info (dimensions and orientation) without rendering.
     pub fn page_info(&self, docx_bytes: &[u8]) -> PageInfo {
         detect_page_info(docx_bytes, self.dpi)
@@ -85,18 +78,9 @@ impl DocxRenderer {
 
         let gs = self.find_gs();
         let pandoc = self.find_tool("pandoc", &self.pandoc_path);
-        let wkhtml = self.find_tool("wkhtmltoimage", &self.wkhtmltoimage_path);
         let mut last_err = None;
 
-        // Priority 1: Pandoc + wkhtmltoimage — decent quality, lighter bundle
-        if let (Some(pandoc), Some(wkhtml)) = (&pandoc, &wkhtml) {
-            match self.run_pandoc_wkhtml(pandoc, wkhtml, &docx_path, tmp.path(), &page_info) {
-                Ok(pages) => return Ok(pages),
-                Err(e) => last_err = Some(e),
-            }
-        }
-
-        // Priority 2: Pandoc → HTML → PDF via wkhtmltopdf → PNG via gs
+        // Pandoc → HTML → PDF via wkhtmltopdf → PNG via gs
         if let Some(pandoc) = &pandoc {
             if let Some(gs) = &gs {
                 let wkhtmltopdf = self.find_tool("wkhtmltopdf", &None);
@@ -194,6 +178,8 @@ impl DocxRenderer {
             .arg(&self.dpi.to_string())
             .arg("-dTextAlphaBits=4")
             .arg("-dGraphicsAlphaBits=4")
+            .arg("-dFirstPage=1")
+            .arg("-dLastPage=1")
             .arg("-o")
             .arg(&out_pattern)
             .arg(pdf_path)
@@ -207,56 +193,6 @@ impl DocxRenderer {
             });
         }
         load_png_pages(out_dir)
-    }
-
-    // ─── pandoc + wkhtmltoimage ──────────────────────────────────
-
-    fn run_pandoc_wkhtml(
-        &self,
-        pandoc: &Path,
-        wkhtml: &Path,
-        docx_path: &Path,
-        out_dir: &Path,
-        page_info: &PageInfo,
-    ) -> Result<Vec<RgbaImage>, DocxToImageError> {
-        let html_path = out_dir.join("output.html");
-        let out = Command::new(pandoc)
-            .arg("-t")
-            .arg("html5")
-            .arg("--self-contained")
-            .arg("-o")
-            .arg(&html_path)
-            .arg(docx_path)
-            .output()?;
-        if !out.status.success() {
-            return Err(DocxToImageError::CommandFailed {
-                cmd: "pandoc -t html5 --self-contained".into(),
-                code: out.status.code().unwrap_or(-1),
-                stderr: String::from_utf8_lossy(&out.stderr).into(),
-            });
-        }
-
-        let png_path = out_dir.join("output.png");
-        let out = Command::new(wkhtml)
-            .arg("--format")
-            .arg("png")
-            .arg("--width")
-            .arg(page_info.width_px.to_string())
-            .arg(&html_path)
-            .arg(&png_path)
-            .output()?;
-        if !out.status.success() {
-            return Err(DocxToImageError::CommandFailed {
-                cmd: format!("{} --format png", wkhtml.display()),
-                code: out.status.code().unwrap_or(-1),
-                stderr: String::from_utf8_lossy(&out.stderr).into(),
-            });
-        }
-
-        let img = image::open(&png_path)
-            .map_err(|e| DocxToImageError::Image(e.to_string()))?
-            .into_rgba8();
-        Ok(vec![img])
     }
 
     // ─── pandoc → wkhtmltopdf → gs (multi-page) ─────────────────

@@ -33,7 +33,7 @@
     ],
     "resources": {
       "models/": "models/",
-      "tools/": "tools/"
+      "../tools/": "tools/"
     }
   }
 }
