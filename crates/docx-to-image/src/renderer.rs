@@ -6,6 +6,23 @@ use tempfile::TempDir;
 
 use crate::error::DocxToImageError;
 
+// ─── public types ─────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PageOrientation {
+    Portrait,
+    Landscape,
+}
+
+#[derive(Debug, Clone)]
+pub struct PageInfo {
+    pub width_px: u32,
+    pub height_px: u32,
+    pub orientation: PageOrientation,
+    pub width_twip: u32,
+    pub height_twip: u32,
+}
+
 const DEFAULT_DPI: u32 = 200;
 
 pub struct DocxRenderer {
@@ -53,13 +70,18 @@ impl DocxRenderer {
         self
     }
 
+    /// Detect page info (dimensions and orientation) without rendering.
+    pub fn page_info(&self, docx_bytes: &[u8]) -> PageInfo {
+        detect_page_info(docx_bytes, self.dpi)
+    }
+
     pub fn render(&self, docx_bytes: &[u8]) -> Result<Vec<RgbaImage>, DocxToImageError> {
         let tmp = TempDir::new()?;
         let docx_path = tmp.path().join("input.docx");
         std::fs::write(&docx_path, docx_bytes)?;
 
-        // detect page width from DOCX (TWIPs → pixels)
-        let page_w_px = detect_page_width(docx_bytes, self.dpi);
+        // detect page info from DOCX (TWIPs → pixels, orientation)
+        let page_info = detect_page_info(docx_bytes, self.dpi);
 
         let gs = self.find_gs();
         let pandoc = self.find_tool("pandoc", &self.pandoc_path);
@@ -68,7 +90,7 @@ impl DocxRenderer {
 
         // Priority 1: Pandoc + wkhtmltoimage — decent quality, lighter bundle
         if let (Some(pandoc), Some(wkhtml)) = (&pandoc, &wkhtml) {
-            match self.run_pandoc_wkhtml(pandoc, wkhtml, &docx_path, tmp.path(), page_w_px) {
+            match self.run_pandoc_wkhtml(pandoc, wkhtml, &docx_path, tmp.path(), &page_info) {
                 Ok(pages) => return Ok(pages),
                 Err(e) => last_err = Some(e),
             }
@@ -79,7 +101,7 @@ impl DocxRenderer {
             if let Some(gs) = &gs {
                 let wkhtmltopdf = self.find_tool("wkhtmltopdf", &None);
                 if let Some(wkpdf) = wkhtmltopdf {
-                    match self.run_pandoc_wkhtmltopdf_gs(pandoc, &wkpdf, gs, &docx_path, tmp.path())
+                    match self.run_pandoc_wkhtmltopdf_gs(pandoc, &wkpdf, gs, &docx_path, tmp.path(), &page_info)
                     {
                         Ok(pages) => return Ok(pages),
                         Err(e) => last_err = Some(e),
@@ -195,7 +217,7 @@ impl DocxRenderer {
         wkhtml: &Path,
         docx_path: &Path,
         out_dir: &Path,
-        page_w_px: u32,
+        page_info: &PageInfo,
     ) -> Result<Vec<RgbaImage>, DocxToImageError> {
         let html_path = out_dir.join("output.html");
         let out = Command::new(pandoc)
@@ -219,7 +241,7 @@ impl DocxRenderer {
             .arg("--format")
             .arg("png")
             .arg("--width")
-            .arg(page_w_px.to_string())
+            .arg(page_info.width_px.to_string())
             .arg(&html_path)
             .arg(&png_path)
             .output()?;
@@ -246,6 +268,7 @@ impl DocxRenderer {
         gs: &Path,
         docx_path: &Path,
         out_dir: &Path,
+        page_info: &PageInfo,
     ) -> Result<Vec<RgbaImage>, DocxToImageError> {
         let html_path = out_dir.join("output.html");
         let out = Command::new(pandoc)
@@ -265,15 +288,19 @@ impl DocxRenderer {
         }
 
         let pdf_path = out_dir.join("output.pdf");
-        let out = Command::new(wkpdf)
-            .arg("--page-size")
-            .arg("A4")
-            .arg(&html_path)
-            .arg(&pdf_path)
-            .output()?;
+
+        // Convert TWIPs → mm: 1 TWIP = 1/1440 inch, 1 inch = 25.4 mm
+        let w_mm = ((page_info.width_twip  as f64 * 25.4) / 1440.0).round() as u32;
+        let h_mm = ((page_info.height_twip as f64 * 25.4) / 1440.0).round() as u32;
+
+        let mut cmd = Command::new(wkpdf);
+        cmd.arg("--page-width").arg(format!("{}mm", w_mm));
+        cmd.arg("--page-height").arg(format!("{}mm", h_mm));
+        cmd.arg(&html_path).arg(&pdf_path);
+        let out = cmd.output()?;
         if !out.status.success() {
             return Err(DocxToImageError::CommandFailed {
-                cmd: format!("{} --page-size A4", wkpdf.display()),
+                cmd: format!("{} --page-width {}mm --page-height {}mm", wkpdf.display(), w_mm, h_mm),
                 code: out.status.code().unwrap_or(-1),
                 stderr: String::from_utf8_lossy(&out.stderr).into(),
             });
@@ -283,19 +310,47 @@ impl DocxRenderer {
     }
 }
 
-// ─── page size detection ───────────────────────────────────────────
+// ─── page info detection ──────────────────────────────────────────────
 
-const DEFAULT_TWIP_W: u32 = 11906; // A4 default
+const DEFAULT_TWIP_W: u32 = 11906; // A4 default width
+const DEFAULT_TWIP_H: u32 = 16838; // A4 default height
 
-fn detect_page_width(docx_bytes: &[u8], dpi: u32) -> u32 {
-    let twip_w = docx_rs::read_docx(docx_bytes)
+fn detect_page_info(docx_bytes: &[u8], dpi: u32) -> PageInfo {
+    let page_size = docx_rs::read_docx(docx_bytes)
         .ok()
-        .and_then(|docx| serde_json::to_value(&docx.document.section_property.page_size).ok())
-        .and_then(|v| v.get("w").and_then(|w| w.as_u64()).map(|w| w as u32))
+        .and_then(|docx| serde_json::to_value(&docx.document.section_property.page_size).ok());
+
+    let twip_w = page_size
+        .as_ref()
+        .and_then(|v| v.get("w").and_then(|w| w.as_u64()))
+        .map(|w| w as u32)
         .unwrap_or(DEFAULT_TWIP_W);
 
-    let px = (twip_w * dpi) / 1440;
-    px.max(800).min(4000)
+    let twip_h = page_size
+        .as_ref()
+        .and_then(|v| v.get("h").and_then(|h| h.as_u64()))
+        .map(|h| h as u32)
+        .unwrap_or(DEFAULT_TWIP_H);
+
+    let orientation = page_size
+        .as_ref()
+        .and_then(|v| v.get("orient").and_then(|o| o.as_str()))
+        .map(|o| match o {
+            "landscape" => PageOrientation::Landscape,
+            _ => PageOrientation::Portrait,
+        })
+        .unwrap_or(PageOrientation::Portrait);
+
+    let w_px = ((twip_w * dpi) / 1440).max(800).min(4000);
+    let h_px = ((twip_h * dpi) / 1440).max(800).min(4000);
+
+    PageInfo {
+        width_px: w_px,
+        height_px: h_px,
+        orientation,
+        width_twip: twip_w,
+        height_twip: twip_h,
+    }
 }
 
 // ─── helpers ───────────────────────────────────────────────────────

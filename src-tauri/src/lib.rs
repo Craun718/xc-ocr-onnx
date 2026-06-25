@@ -10,6 +10,7 @@ pub struct PageImage {
     pub page: usize,
     pub width: u32,
     pub height: u32,
+    pub orientation: String,
     pub image_data: String,
 }
 
@@ -65,6 +66,7 @@ fn render_docx(
             page: i,
             width: img.width(),
             height: img.height(),
+            orientation: if img.width() > img.height() { "landscape".into() } else { "portrait".into() },
             image_data,
         });
     }
