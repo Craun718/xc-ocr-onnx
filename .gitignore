@@ -32,3 +32,4 @@ src-tauri/tools/*
 tools/*
 
 */~$*.docx
+test/测试样板.docx

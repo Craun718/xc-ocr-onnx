@@ -580,30 +580,64 @@ const DEFAULT_TWIP_W: u32 = 11906; // A4 default width
 const DEFAULT_TWIP_H: u32 = 16838; // A4 default height
 
 fn detect_page_info(docx_bytes: &[u8], dpi: u32) -> PageInfo {
-    let page_size = docx_rs::read_docx(docx_bytes)
-        .ok()
-        .and_then(|docx| serde_json::to_value(&docx.document.section_property.page_size).ok());
+    let docx = docx_rs::read_docx(docx_bytes).ok();
 
-    let twip_w = page_size
+    // Multi-section DOCX files store the first section's properties in a
+    // paragraph's section_property field, while document.section_property
+    // only holds the LAST section. Search children first for section breaks.
+    let page_size = docx
+        .as_ref()
+        .and_then(|docx| {
+            // Walk children in order to find the first paragraph that contains
+            // a sectPr (section property). This is the first section's page setup.
+            docx.document.children.iter().find_map(|child| {
+                if let docx_rs::DocumentChild::Paragraph(para) = child {
+                    para.property.section_property.as_ref()
+                } else {
+                    None
+                }
+            })
+        })
+        .map(|sp| &sp.page_size);
+
+    // Fall back to document-level section_property (single-section,
+    // or no paragraph-level sectPr found).
+    let fallback = docx
+        .as_ref()
+        .map(|d| &d.document.section_property.page_size);
+    let page_size = page_size.or(fallback);
+
+    let page_size_json = serde_json::to_value(page_size).ok();
+
+    let twip_w = page_size_json
         .as_ref()
         .and_then(|v| v.get("w").and_then(|w| w.as_u64()))
         .map(|w| w as u32)
         .unwrap_or(DEFAULT_TWIP_W);
 
-    let twip_h = page_size
+    let twip_h = page_size_json
         .as_ref()
         .and_then(|v| v.get("h").and_then(|h| h.as_u64()))
         .map(|h| h as u32)
         .unwrap_or(DEFAULT_TWIP_H);
 
-    let orientation = page_size
+    // docx_rs 0.4.x reader ignores the "orient" attribute on <w:pgSz>, so
+    // we read it from JSON when present, and fall back to comparing width/height.
+    let orientation = page_size_json
         .as_ref()
         .and_then(|v| v.get("orient").and_then(|o| o.as_str()))
         .map(|o| match o {
             "landscape" => PageOrientation::Landscape,
             _ => PageOrientation::Portrait,
         })
-        .unwrap_or(PageOrientation::Portrait);
+        .unwrap_or_else(|| {
+            // orient not explicitly set — compare w/h
+            if twip_w > twip_h {
+                PageOrientation::Landscape
+            } else {
+                PageOrientation::Portrait
+            }
+        });
 
     let w_px = ((twip_w * dpi) / 1440).max(800).min(4000);
     let h_px = ((twip_h * dpi) / 1440).max(800).min(4000);
