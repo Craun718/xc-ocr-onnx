@@ -19,6 +19,13 @@ struct OcrState {
     renderer: docx_to_image::DocxRenderer,
 }
 
+#[tauri::command]
+fn read_file_as_data_url(path: String) -> Result<String, String> {
+    let bytes = std::fs::read(&path).map_err(|e| format!("读取文件失败: {}", e))?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(format!("data:;base64,{}", b64))
+}
+
 fn decode_base64(data: &str) -> Result<Vec<u8>, String> {
     let b64 = if let Some(pos) = data.find(',') { &data[pos + 1..] } else { data };
     base64::engine::general_purpose::STANDARD
@@ -43,20 +50,30 @@ fn encode_png_base64(img: &image::RgbaImage) -> Result<String, String> {
 #[tauri::command]
 fn recognize_image(
     state: tauri::State<OcrState>,
+    filename: String,
     data: String,
 ) -> Result<Vec<ocr::OcrBlock>, String> {
     let guard = state.engine.lock().map_err(|e| e.to_string())?;
     let engine = guard.as_ref().ok_or("OCR engine not initialized")?;
     let img = decode_base64_image(&data)?;
-    engine.recognize_all(&img).map_err(|e| e.to_string())
+    eprintln!("[xc-ocr] 识别图片: {}, 尺寸: {}x{} px, base64: {} bytes",
+        filename, img.width(), img.height(), data.len());
+    let blocks = engine.recognize_all(&img).map_err(|e| e.to_string())?;
+    eprintln!("[xc-ocr] 识别完成: {}, {} 个文本块", filename, blocks.len());
+    for (i, b) in blocks.iter().enumerate() {
+        eprintln!("[xc-ocr]   [{:>3}] conf={:.3} text={}", i, b.confidence, b.text);
+    }
+    Ok(blocks)
 }
 
 #[tauri::command]
 fn render_docx(
     state: tauri::State<OcrState>,
+    filename: String,
     data: String,
 ) -> Result<Vec<PageImage>, String> {
     let docx_bytes = decode_base64(&data)?;
+    eprintln!("[xc-ocr] 导入 DOCX: {}, 大小: {} bytes", filename, docx_bytes.len());
     let pages = state.renderer.render(&docx_bytes).map_err(|e| e.to_string())?;
 
     let mut results = Vec::with_capacity(pages.len());
@@ -196,6 +213,7 @@ fn find_bundled_tools_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let default_variant = "v4";
             let (det_bytes, rec_bytes, keys_bytes) =
@@ -216,6 +234,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            read_file_as_data_url,
             recognize_image,
             render_docx,
             list_models,
