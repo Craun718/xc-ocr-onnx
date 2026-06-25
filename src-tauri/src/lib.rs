@@ -74,8 +74,8 @@ fn render_docx(
 // ── model commands ─────────────────────────────────────────────────
 
 #[tauri::command]
-fn list_models() -> Result<Vec<String>, String> {
-    find_models_root()
+fn list_models(app: tauri::AppHandle) -> Result<Vec<String>, String> {
+    find_models_root(&app)
         .map(|dir| {
             let mut variants: Vec<String> = std::fs::read_dir(&dir)
                 .ok()
@@ -97,10 +97,11 @@ fn list_models() -> Result<Vec<String>, String> {
 
 #[tauri::command]
 fn switch_model(
+    app: tauri::AppHandle,
     state: tauri::State<OcrState>,
     variant: String,
 ) -> Result<(), String> {
-    let model_dir = find_models_root()?.join(&variant);
+    let model_dir = find_models_root(&app)?.join(&variant);
 
     let det_path = model_dir.join("det.onnx");
     let rec_path = model_dir.join("rec.onnx");
@@ -123,10 +124,18 @@ fn switch_model(
 
 // ── model path discovery ───────────────────────────────────────────
 
-fn find_models_root() -> Result<PathBuf, String> {
+fn find_models_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    // Production: bundled resources
+    if let Ok(res_dir) = app.path().resource_dir() {
+        let path = res_dir.join("models").join("ocr");
+        if path.is_dir() {
+            return Ok(path);
+        }
+    }
+    // Development: relative paths
     let candidates = [
-        PathBuf::from("models").join("ocr"),
         PathBuf::from("src-tauri").join("models").join("ocr"),
+        PathBuf::from("models").join("ocr"),
     ];
     for path in &candidates {
         if path.is_dir() {
@@ -136,8 +145,8 @@ fn find_models_root() -> Result<PathBuf, String> {
     Err("模型目录 models/ocr/ 未找到".into())
 }
 
-fn load_model_for_variant(variant: &str) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), String> {
-    let root = find_models_root()?;
+fn load_model_for_variant(app: &tauri::AppHandle, variant: &str) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), String> {
+    let root = find_models_root(app)?;
     let dir = root.join(variant);
     let det = std::fs::read(dir.join("det.onnx"))
         .map_err(|e| format!("读取 {variant}/det.onnx 失败: {e}"))?;
@@ -174,7 +183,7 @@ pub fn run() {
         .setup(|app| {
             let default_variant = "v4";
             let (det_bytes, rec_bytes, keys_bytes) =
-                load_model_for_variant(default_variant)?;
+                load_model_for_variant(&app.handle(), default_variant)?;
 
             let engine = ocr::OcrEngine::new(&det_bytes, &rec_bytes, &keys_bytes)
                 .map_err(|e| format!("Failed to init OCR: {}", e))?;
