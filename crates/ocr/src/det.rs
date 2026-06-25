@@ -9,7 +9,7 @@ use crate::TextRegion;
 
 const DET_LONG_SIDE: u32 = 960;
 const DET_THRESHOLD: f32 = 0.3;
-const BOX_THRESHOLD: f32 = 0.7;
+const BOX_THRESHOLD: f32 = 0.6;
 const UNCLIP_RATIO: f32 = 2.0;
 const MAX_CANDIDATES: usize = 1000;
 const MIN_SIZE: f32 = 3.0;

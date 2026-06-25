@@ -7,8 +7,6 @@ mod rec;
 use image::DynamicImage;
 use serde::{Deserialize, Serialize};
 
-const OCR_THRESHOLD: f32 = 0.3;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextRegion {
     pub bbox: [[f32; 2]; 4],
@@ -121,13 +119,9 @@ impl OcrEngine {
         let mut blocks = Vec::with_capacity(regions.len());
         for region in &regions {
             let decoded = self.recognize_text(image, region)?;
-            if decoded.score < OCR_THRESHOLD {
-                continue;
-            }
-
             let (x, y, w, h) = bbox_to_rect(&region.bbox);
             blocks.push(OcrBlock {
-                text: decoded.text.trim().to_string(),
+                text: decoded.text,
                 confidence: decoded.score,
                 x,
                 y,
@@ -156,12 +150,12 @@ impl OcrEngine {
             confidence: 0.0,
         };
         let decoded = self.recognize_text(image, &full_region)?;
-        if decoded.score < OCR_THRESHOLD {
+        if decoded.text.is_empty() {
             return Ok(None);
         }
 
         Ok(Some(OcrBlock {
-            text: decoded.text.trim().to_string(),
+            text: decoded.text,
             confidence: decoded.score,
             x: 0.0,
             y: 0.0,
