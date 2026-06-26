@@ -86,17 +86,7 @@ fn print_dom() {
 
     println!("文件: {}", test_file.canonicalize().unwrap().display());
     println!("大小: {} bytes", docx_bytes.len());
-
-    let html = docx_to_image::render_docx_html(&docx_bytes);
-    match &html {
-        Some(h) => {
-            println!("--- HTML ---");
-            println!("{}", h);
-        }
-        None => {
-            println!("纯 Rust HTML 生成返回 None（文档含表格/绘图等），尝试 pandoc 回退...");
-        }
-    }
+    println!("自定义渲染器已移除，现在只走 pandoc 转换路径");
 
     let renderer = docx_to_image::DocxRenderer::new();
     let page_info = renderer.page_info(&docx_bytes);
@@ -263,4 +253,92 @@ fn extract_orientation_from_html(html: &str) -> Option<docx_to_image::PageOrient
     }
 
     None
+}
+
+/// 创建一个预配置的 DocxRenderer，自动搜索项目 tools/ 目录
+fn create_renderer_with_tools() -> docx_to_image::DocxRenderer {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let tools_dir = manifest_dir.join("..").join("..").join("tools").join("windows-x86_64");
+    let mut renderer = docx_to_image::DocxRenderer::new();
+    if tools_dir.is_dir() {
+        renderer = renderer.add_tool_dir(&tools_dir);
+    }
+    renderer
+}
+
+/// 通用渲染方向验证：渲染 docx，验证 page_info 方向与输出图片方向一致
+fn assert_render_orientation(
+    label: &str,
+    docx_bytes: &[u8],
+    expected: docx_to_image::PageOrientation,
+) {
+    let renderer = create_renderer_with_tools();
+    let page_info = renderer.page_info(docx_bytes);
+
+    println!(
+        "[{}] DOCX 元数据: {}x{} TWIP, 方向: {:?}",
+        label, page_info.width_twip, page_info.height_twip, page_info.orientation,
+    );
+
+    // 1. 验证元数据方向
+    assert_eq!(
+        page_info.orientation, expected,
+        "[{}] DOCX 元数据方向应为 {:?}，实际为 {:?}",
+        label, expected, page_info.orientation,
+    );
+
+    let is_landscape = matches!(expected, docx_to_image::PageOrientation::Landscape);
+    println!(
+        "[{}] 期望输出为{}, CSS viewport: {}x{} px",
+        label,
+        if is_landscape { "横向" } else { "纵向" },
+        page_info.width_twip / 15,
+        page_info.height_twip / 15,
+    );
+
+    // 2. 渲染并验证输出图片方向
+    match renderer.render(docx_bytes) {
+        Ok(pages) => {
+            assert!(!pages.is_empty(), "渲染结果不应为空");
+            let img = &pages[0];
+            let w = img.width();
+            let h = img.height();
+            let cmp = if w > h { ">" } else if w < h { "<" } else { "=" };
+            println!("[{}] 渲染输出: {}x{} px, width {} height", label, w, h, cmp);
+
+            if is_landscape {
+                assert!(w > h,
+                    "[{}] 横向 DOCX 输出图片应为 width > height，实际: {}x{} px", label, w, h);
+            } else {
+                assert!(h > w,
+                    "[{}] 纵向 DOCX 输出图片应为 height > width，实际: {}x{} px", label, w, h);
+            }
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("没有找到可用的转换工具") {
+                println!("[工具] 渲染工具不可用，跳过实际渲染验证: {}", msg);
+                return;
+            }
+            panic!("[{}] 渲染失败: {}", label, e);
+        }
+    }
+}
+
+/// 仓库数据调整.docx — 纯纵向 A4，无表格，走自定义渲染器
+#[test]
+fn render_output_portrait() {
+    let (test_file, docx_bytes) = read_test_docx();
+    println!("文件: {}", test_file.canonicalize().unwrap().display());
+    println!("大小: {} bytes", docx_bytes.len());
+    assert_render_orientation("仓库数据调整", &docx_bytes, docx_to_image::PageOrientation::Portrait);
+}
+
+/// 测试样板.docx — 第一页横向，含表格/图片，走 pandoc 回退路径
+#[test]
+fn render_output_landscape() {
+    let (test_file, docx_bytes) = read_test_docx2();
+    println!("文件: {}", test_file.canonicalize().unwrap().display());
+    println!("大小: {} bytes", docx_bytes.len());
+    assert_render_orientation("测试样板", &docx_bytes, docx_to_image::PageOrientation::Landscape);
 }

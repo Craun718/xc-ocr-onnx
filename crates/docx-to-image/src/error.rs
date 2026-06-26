@@ -13,4 +13,7 @@ pub enum DocxToImageError {
 
     #[error("Image error: {0}")]
     Image(String),
+
+    #[error("ZIP error: {0}")]
+    Zip(#[from] zip::result::ZipError),
 }

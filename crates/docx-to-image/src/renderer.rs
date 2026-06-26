@@ -1,3 +1,4 @@
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -12,6 +13,15 @@ use crate::error::DocxToImageError;
 pub enum PageOrientation {
     Portrait,
     Landscape,
+}
+
+impl PageOrientation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PageOrientation::Portrait => "portrait",
+            PageOrientation::Landscape => "landscape",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -77,10 +87,15 @@ impl DocxRenderer {
 
     pub fn render(&self, docx_bytes: &[u8]) -> Result<Vec<RgbaImage>, DocxToImageError> {
         let tmp = TempDir::new()?;
-        let docx_path = tmp.path().join("input.docx");
-        std::fs::write(&docx_path, docx_bytes)?;
 
-        // detect page info from DOCX (TWIPs → pixels, orientation)
+        // 预处理：给 DOCX 空段落注入空格 run（pandoc 会丢弃无 run 的空段）
+        let preprocessed_bytes = fix_empty_paragraphs_in_docx(docx_bytes)
+            .unwrap_or_else(|_| docx_bytes.to_vec());
+        let docx_path = tmp.path().join("input.docx");
+        std::fs::write(&docx_path, &preprocessed_bytes)?;
+
+        // detect page info from original DOCX (TWIPs → pixels, orientation)
+        // 用原始 bytes 检测，方向信息不受预处理影响
         let page_info = detect_page_info(docx_bytes, self.dpi);
         eprintln!(
             "[docx-to-image] DOCX 页面尺寸: {}x{} TWIP ({}x{} px @ {} DPI), 方向: {:?}",
@@ -217,7 +232,7 @@ impl DocxRenderer {
         load_png_pages(out_dir)
     }
 
-    // ─── pandoc + wkhtmltoimage (single-page) ───────────────────
+    /// 用 pandoc 将 DOCX 转 HTML5，再用 wkhtmltoimage 渲染成 PNG
 
     fn run_pandoc_wkhtml(
         &self,
@@ -228,30 +243,45 @@ impl DocxRenderer {
         page_info: &PageInfo,
     ) -> Result<Vec<RgbaImage>, DocxToImageError> {
         let html_path = out_dir.join("output.html");
-        let docx_bytes = std::fs::read(docx_path)?;
-        let content = if let Some(content) = render_docx_html(&docx_bytes) {
-            std::fs::write(&html_path, &content)?;
-            content
-        } else {
-            let out = Command::new(pandoc)
-                .arg("-f")
-                .arg("docx+empty_paragraphs")
-                .arg("-t")
-                .arg("html5")
-                .arg("--self-contained")
-                .arg("-o")
-                .arg(&html_path)
-                .arg(docx_path)
-                .output()?;
-            if !out.status.success() {
-                return Err(DocxToImageError::CommandFailed {
-                    cmd: "pandoc -t html5 --self-contained".into(),
-                    code: out.status.code().unwrap_or(-1),
-                    stderr: String::from_utf8_lossy(&out.stderr).into(),
-                });
-            }
-            std::fs::read_to_string(&html_path)?
-        };
+        let out = Command::new(pandoc)
+            .arg("-f")
+            .arg("docx+empty_paragraphs")
+            .arg("-t")
+            .arg("html5")
+            .arg("--embed-resources")
+            .arg("--standalone")
+            .arg("-o")
+            .arg(&html_path)
+            .arg(docx_path)
+            .output()?;
+        if !out.status.success() {
+            return Err(DocxToImageError::CommandFailed {
+                cmd: "pandoc -t html5 --self-contained".into(),
+                code: out.status.code().unwrap_or(-1),
+                stderr: String::from_utf8_lossy(&out.stderr).into(),
+            });
+        }
+        let content = std::fs::read_to_string(&html_path)?;
+
+        // 移除 pandoc 默认的 max-width 和 body padding，让内容填满视口
+        let content = content
+            .replace("max-width: 36em;", "")
+            .replace("margin: 0 auto;", "margin: 0;")
+            .replace("padding-left: 50px;", "")
+            .replace("padding-right: 50px;", "")
+            .replace("padding-top: 50px;", "")
+            .replace("padding-bottom: 50px;", "");
+        // 覆盖 p 样式：保留空格缩进/空段换行，紧凑间距
+        let content = content.replace(
+            "p {",
+            "p { white-space: pre-wrap; line-height: 100%; margin: 0;",
+        );
+        // 基础字体大小
+        let content = content.replace(
+            "text-rendering: optimizeLegibility;",
+            "text-rendering: optimizeLegibility;font-size:14pt;",
+        );
+        std::fs::write(&html_path, &content)?;
 
         // debug: save HTML for inspection
         {
@@ -270,13 +300,19 @@ impl DocxRenderer {
 
         let png_path = out_dir.join("output.png");
         // wkhtmltoimage uses CSS pixels (96 DPI): TWIP → CSS px = TWIP * 96 / 1440 = TWIP / 15
-        // Only set --width for correct line wrapping; omit --height so full content is rendered
         let css_w = page_info.width_twip / 15;
+        let css_h = page_info.height_twip / 15;
+        eprintln!(
+            "[docx-to-image] wkhtmltoimage viewport: {}x{} px (from {}x{} TWIP)",
+            css_w, css_h, page_info.width_twip, page_info.height_twip,
+        );
         let out = Command::new(wkhtml)
             .arg("--format")
             .arg("png")
             .arg("--width")
             .arg(css_w.to_string())
+            .arg("--height")
+            .arg(css_h.to_string())
             .arg(&html_path)
             .arg(&png_path)
             .output()?;
@@ -326,6 +362,11 @@ impl DocxRenderer {
             });
         }
 
+        // 移除 pandoc 默认的 max-width: 36em 限制
+        if let Ok(html) = std::fs::read_to_string(&html_path) {
+            let _ = std::fs::write(&html_path, html.replace("max-width: 36em;", ""));
+        }
+
         let pdf_path = out_dir.join("output.pdf");
 
         // Convert TWIPs → mm: 1 TWIP = 1/1440 inch, 1 inch = 25.4 mm
@@ -355,226 +396,6 @@ impl DocxRenderer {
         Ok(pages)
     }
 }
-
-pub fn render_docx_html(docx_bytes: &[u8]) -> Option<String> {
-    let docx = docx_rs::read_docx(docx_bytes).ok()?;
-    let mut body = String::new();
-
-    for child in &docx.document.children {
-        match child {
-            docx_rs::DocumentChild::Paragraph(p) => {
-                body.push_str("<p>");
-                if !render_paragraph(p, &mut body) {
-                    return None;
-                }
-                body.push_str("</p>\n");
-            }
-            docx_rs::DocumentChild::Section(_) => {}
-            docx_rs::DocumentChild::BookmarkStart(_) => {}
-            docx_rs::DocumentChild::BookmarkEnd(_) => {}
-            docx_rs::DocumentChild::CommentStart(_) => {}
-            docx_rs::DocumentChild::CommentEnd(_) => {}
-            docx_rs::DocumentChild::StructuredDataTag(_) => {}
-            docx_rs::DocumentChild::Table(_) => return None,
-            docx_rs::DocumentChild::TableOfContents(_) => return None,
-        }
-    }
-
-    Some(format!(
-        r#"<!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
-  <style>
-    html {{
-      color: #1a1a1a;
-      background-color: #fdfdfd;
-    }}
-    body {{
-      margin: 0;
-      padding: 0;
-      width: 100%;
-      box-sizing: border-box;
-      hyphens: auto;
-      overflow-wrap: break-word;
-      text-rendering: optimizeLegibility;
-      font-kerning: normal;
-      font-family: "Noto Serif CJK SC", "SimSun", serif;
-    }}
-    p {{
-      margin: 0;
-      line-height: 100%;
-      white-space: pre-wrap;
-    }}
-    @media (max-width: 600px) {{
-      body {{
-        font-size: 0.9em;
-        padding: 12px;
-      }}
-    }}
-  </style>
-</head>
-<body>
-{}
-</body>
-</html>"#,
-        body
-    ))
-}
-
-fn render_paragraph(paragraph: &docx_rs::Paragraph, out: &mut String) -> bool {
-    let start_len = out.len();
-    for child in &paragraph.children {
-        if !render_paragraph_child(child, out) {
-            return false;
-        }
-    }
-    if out.len() == start_len {
-        out.push_str("<br />");
-    }
-    true
-}
-
-fn render_paragraph_child(child: &docx_rs::ParagraphChild, out: &mut String) -> bool {
-    match child {
-        docx_rs::ParagraphChild::Run(run) => render_run(run, out),
-        docx_rs::ParagraphChild::Hyperlink(link) => {
-            for child in &link.children {
-                if !render_paragraph_child(child, out) {
-                    return false;
-                }
-            }
-            true
-        }
-        docx_rs::ParagraphChild::Insert(insert) => {
-            for child in &insert.children {
-                if !render_insert_child(child, out) {
-                    return false;
-                }
-            }
-            true
-        }
-        docx_rs::ParagraphChild::Delete(delete) => {
-            for child in &delete.children {
-                if !render_delete_child(child, out) {
-                    return false;
-                }
-            }
-            true
-        }
-        docx_rs::ParagraphChild::BookmarkStart(_) => true,
-        docx_rs::ParagraphChild::BookmarkEnd(_) => true,
-        docx_rs::ParagraphChild::CommentStart(_) => true,
-        docx_rs::ParagraphChild::CommentEnd(_) => true,
-        docx_rs::ParagraphChild::StructuredDataTag(_) => true,
-        docx_rs::ParagraphChild::PageNum(_) => true,
-        docx_rs::ParagraphChild::NumPages(_) => true,
-    }
-}
-
-fn render_insert_child(child: &docx_rs::InsertChild, out: &mut String) -> bool {
-    match child {
-        docx_rs::InsertChild::Run(run) => render_run(run, out),
-        docx_rs::InsertChild::Delete(delete) => {
-            for child in &delete.children {
-                if !render_delete_child(child, out) {
-                    return false;
-                }
-            }
-            true
-        }
-        docx_rs::InsertChild::CommentStart(_) => true,
-        docx_rs::InsertChild::CommentEnd(_) => true,
-    }
-}
-
-fn render_delete_child(child: &docx_rs::DeleteChild, out: &mut String) -> bool {
-    match child {
-        docx_rs::DeleteChild::Run(run) => render_run(run, out),
-        docx_rs::DeleteChild::CommentStart(_) => true,
-        docx_rs::DeleteChild::CommentEnd(_) => true,
-    }
-}
-
-fn render_run(run: &docx_rs::Run, out: &mut String) -> bool {
-    for child in &run.children {
-        if !render_run_child(child, out) {
-            return false;
-        }
-    }
-    true
-}
-
-fn render_run_child(child: &docx_rs::RunChild, out: &mut String) -> bool {
-    match child {
-        docx_rs::RunChild::Text(text) => {
-            out.push_str(&escape_html(&text.text));
-            true
-        }
-        docx_rs::RunChild::Break(break_item) => {
-            if is_text_wrapping_break(break_item) {
-                out.push_str("<br />");
-                true
-            } else if is_page_break(break_item) {
-                out.push_str("<div style=\"page-break-after: always;\"></div>");
-                true
-            } else {
-                true
-            }
-        }
-        docx_rs::RunChild::Tab(_) => {
-            out.push_str("    ");
-            true
-        }
-        docx_rs::RunChild::PTab(_) => {
-            out.push_str("    ");
-            true
-        }
-        docx_rs::RunChild::Sym(_) => true,
-        docx_rs::RunChild::DeleteText(_) => true,
-        docx_rs::RunChild::Drawing(_) => false,
-        docx_rs::RunChild::Shape(_) => false,
-        docx_rs::RunChild::CommentStart(_) => true,
-        docx_rs::RunChild::CommentEnd(_) => true,
-        docx_rs::RunChild::FieldChar(_) => true,
-        docx_rs::RunChild::InstrText(_) => true,
-        docx_rs::RunChild::DeleteInstrText(_) => true,
-        docx_rs::RunChild::InstrTextString(_) => true,
-        docx_rs::RunChild::FootnoteReference(_) => false,
-        docx_rs::RunChild::Shading(_) => true,
-    }
-}
-
-fn escape_html(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for ch in text.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            _ => out.push(ch),
-        }
-    }
-    out
-}
-
-fn is_text_wrapping_break(break_item: &docx_rs::Break) -> bool {
-    matches!(break_kind(break_item).as_deref(), Some("textWrapping"))
-}
-
-fn is_page_break(break_item: &docx_rs::Break) -> bool {
-    matches!(break_kind(break_item).as_deref(), Some("page"))
-}
-
-fn break_kind(break_item: &docx_rs::Break) -> Option<String> {
-    let value = serde_json::to_value(break_item).ok()?;
-    value.get("breakType")?.as_str().map(|s| s.to_string())
-}
-
-// ─── page info detection ──────────────────────────────────────────────
 
 const DEFAULT_TWIP_W: u32 = 11906; // A4 default width
 const DEFAULT_TWIP_H: u32 = 16838; // A4 default height
@@ -653,6 +474,88 @@ fn detect_page_info(docx_bytes: &[u8], dpi: u32) -> PageInfo {
 
 // ─── helpers ───────────────────────────────────────────────────────
 
+/// Pandoc 丢弃没有 `<w:r>` 的空段落（即使有 `+empty_paragraphs`）。
+/// 此函数在 ZIP 层修改 `word/document.xml`，给空 `<w:p>` 注入空格 run，
+/// 让 pandoc 能够保留它们。
+fn fix_empty_paragraphs_xml(xml: &str) -> String {
+    // 匹配 <w:p ...> ... </w:p>（非贪心，匹配到第一个 </w:p>）
+    let re = regex::Regex::new(r"(?s)(<w:p[^>]*>)(.*?)(</w:p>)").unwrap();
+    let mut injected = 0usize;
+    let result = re
+        .replace_all(xml, |caps: &regex::Captures| {
+            let content = caps.get(2).unwrap().as_str();
+            // 注意：w:rPr（run 属性）也包含子串 "<w:r"，所以要精确匹配 run 元素
+            if content.contains("<w:r>") || content.contains("<w:r ") || content.contains("<w:r/") {
+                // 有 run 元素 —— 保留原样
+                caps.get(0).unwrap().as_str().to_string()
+            } else {
+                injected += 1;
+                // 无 run —— 保留原有内容（如 w:pPr），注入 U+00A0 空格 run
+                // 普通空格 ' ' 也会被 pandoc 丢弃，必须用 non-breaking space
+                format!(
+                    "{}{}<w:r><w:t xml:space=\"preserve\">\u{a0}</w:t></w:r>{}",
+                    caps.get(1).unwrap().as_str(),
+                    content,
+                    caps.get(3).unwrap().as_str(),
+                )
+            }
+        })
+        .to_string();
+    eprintln!("[docx-to-image] fix_empty_paragraphs_xml: 注入 {} 个空格 run", injected);
+    result
+}
+
+/// Pandoc 丢弃没有 `<w:r>` 的空段落（即使有 `+empty_paragraphs`）。
+/// 此函数在 ZIP 层修改 DOCX，给空 `<w:p>` 注入空格 run，
+/// 让 pandoc 能够保留它们。
+/// 解压→修改→重新打包。
+fn fix_empty_paragraphs_in_docx(docx_bytes: &[u8]) -> Result<Vec<u8>, DocxToImageError> {
+    let cursor = std::io::Cursor::new(docx_bytes);
+    let mut archive = zip::ZipArchive::new(cursor)?;
+
+    let n = archive.len();
+    struct RawEntry {
+        name: String,
+        data: Vec<u8>,
+    }
+    let mut raw_entries: Vec<RawEntry> = Vec::with_capacity(n);
+
+    // 全部读取（by_index 自动解压）
+    for i in 0..n {
+        let mut entry = archive.by_index(i)?;
+        let name = entry.name().to_string();
+        let mut data: Vec<u8> = Vec::new();
+        entry.read_to_end(&mut data)?;
+
+        if name == "word/document.xml" {
+            let xml = String::from_utf8_lossy(&data);
+            let fixed = fix_empty_paragraphs_xml(&xml);
+            raw_entries.push(RawEntry {
+                name,
+                data: fixed.into_bytes(),
+            });
+        } else {
+            raw_entries.push(RawEntry { name, data });
+        }
+    }
+
+    drop(archive);
+
+    // 重新打包（全用 Deflated）
+    let mut out_buf = std::io::Cursor::new(Vec::new());
+    {
+        let mut out_zip = zip::ZipWriter::new(&mut out_buf);
+        for entry in &raw_entries {
+            let options = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            out_zip.start_file(&entry.name, options)?;
+            out_zip.write_all(&entry.data)?;
+        }
+        out_zip.finish()?;
+    }
+    Ok(out_buf.into_inner())
+}
+
 fn tool_in_path(name: &str) -> bool {
     Command::new(name)
         .arg("--version")
@@ -660,7 +563,6 @@ fn tool_in_path(name: &str) -> bool {
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
-
 
 fn load_png_pages(dir: &Path) -> Result<Vec<RgbaImage>, DocxToImageError> {
     let mut pages: Vec<(usize, RgbaImage)> = Vec::new();
@@ -687,44 +589,4 @@ fn load_png_pages(dir: &Path) -> Result<Vec<RgbaImage>, DocxToImageError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
-
-    #[test]
-    fn renders_text_and_page_breaks() {
-        let mut cursor = Cursor::new(Vec::new());
-        docx_rs::Docx::new()
-            .add_paragraph(
-                docx_rs::Paragraph::new().add_run(
-                    docx_rs::Run::new()
-                        .add_text("Hello")
-                        .add_break(docx_rs::BreakType::TextWrapping)
-                        .add_text("World")
-                        .add_break(docx_rs::BreakType::Page)
-                        .add_text("Next"),
-                ),
-            )
-            .build()
-            .pack(&mut cursor)
-            .unwrap();
-
-        let html = render_docx_html(&cursor.into_inner()).unwrap();
-        assert!(html.contains("Hello<br />World"));
-        assert!(html.contains("page-break-after: always"));
-    }
-
-    #[test]
-    fn renders_empty_paragraph_as_blank_line() {
-        let mut cursor = Cursor::new(Vec::new());
-        docx_rs::Docx::new()
-            .add_paragraph(docx_rs::Paragraph::new().add_run(docx_rs::Run::new().add_text("A")))
-            .add_paragraph(docx_rs::Paragraph::new())
-            .add_paragraph(docx_rs::Paragraph::new().add_run(docx_rs::Run::new().add_text("B")))
-            .build()
-            .pack(&mut cursor)
-            .unwrap();
-
-        let html = render_docx_html(&cursor.into_inner()).unwrap();
-        assert!(html.contains("<p><br /></p>"));
-        assert!(!html.contains("max-width: 36em"));
-    }
 }

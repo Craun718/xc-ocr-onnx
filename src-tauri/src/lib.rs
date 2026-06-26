@@ -74,6 +74,13 @@ fn render_docx(
 ) -> Result<Vec<PageImage>, String> {
     let docx_bytes = decode_base64(&data)?;
     eprintln!("[xc-ocr] 导入 DOCX: {}, 大小: {} bytes", filename, docx_bytes.len());
+    let page_info = state.renderer.page_info(&docx_bytes);
+    eprintln!(
+        "[xc-ocr] DOCX 页面信息: {}x{} TWIP ({}x{} px), 方向: {}",
+        page_info.width_twip, page_info.height_twip,
+        page_info.width_px, page_info.height_px,
+        page_info.orientation.as_str(),
+    );
     let pages = state.renderer.render(&docx_bytes).map_err(|e| e.to_string())?;
 
     let mut results = Vec::with_capacity(pages.len());
@@ -83,7 +90,7 @@ fn render_docx(
             page: i,
             width: img.width(),
             height: img.height(),
-            orientation: if img.width() > img.height() { "landscape".into() } else { "portrait".into() },
+            orientation: page_info.orientation.as_str().to_string(),
             image_data,
         });
     }
