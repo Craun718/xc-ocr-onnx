@@ -1,4 +1,6 @@
 use std::sync::Mutex;
+use std::collections::VecDeque;
+use rayon::prelude::*;
 
 mod det;
 mod decode;
@@ -25,7 +27,8 @@ pub struct OcrBlock {
 
 pub struct OcrEngine {
     det_session: Mutex<ort::session::Session>,
-    rec_session: Mutex<ort::session::Session>,
+    rec_sessions: Mutex<VecDeque<ort::session::Session>>,
+    rec_sessions_cvar: std::sync::Condvar,
     det_input: String,
     det_output: String,
     rec_input: String,
@@ -82,9 +85,27 @@ impl OcrEngine {
             );
         }
 
+        // build session pool for concurrent recognition
+        let pool_size = std::cmp::min(
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(2),
+            4,
+        );
+        eprintln!("[ocr] creating rec session pool of size {}", pool_size);
+
+        let mut sessions = VecDeque::with_capacity(pool_size);
+        sessions.push_back(rec_session);
+        for _ in 1..pool_size {
+            sessions.push_back(
+                ort::session::Session::builder()?.commit_from_memory(rec_model)?,
+            );
+        }
+
         Ok(Self {
             det_session: Mutex::new(det_session),
-            rec_session: Mutex::new(rec_session),
+            rec_sessions: Mutex::new(sessions),
+            rec_sessions_cvar: std::sync::Condvar::new(),
             det_input,
             det_output,
             rec_input,
@@ -95,19 +116,43 @@ impl OcrEngine {
         })
     }
 
-    pub fn detect_text_regions(&self, image: &DynamicImage) -> Result<Vec<TextRegion>, Box<dyn std::error::Error>> {
+    pub fn detect_text_regions(&self, image: &DynamicImage) -> Result<Vec<TextRegion>, String> {
         let mut session = self.det_session.lock().map_err(|e| format!("{}", e))?;
         det::detect_text_regions(&mut session, image, &self.det_input, &self.det_output)
+            .map_err(|e| e.to_string())
     }
 
-    pub fn recognize_text(&self, image: &DynamicImage, region: &TextRegion) -> Result<decode::DecodedText, Box<dyn std::error::Error>> {
-        let (data, width) = rec::preprocess_region(image, region, self.rec_height, self.rec_width)?;
-        let mut session = self.rec_session.lock().map_err(|e| format!("{}", e))?;
-        let probs = rec::run_recognition(&mut session, &data, width, self.rec_height, &self.rec_input, &self.rec_output)?;
+    pub fn recognize_text(&self, image: &DynamicImage, region: &TextRegion) -> Result<decode::DecodedText, String> {
+        let (data, width) = rec::preprocess_region(image, region, self.rec_height, self.rec_width)
+            .map_err(|e| e.to_string())?;
+
+        // Pop a session from the pool, blocking until one is available
+        let mut session = {
+            let mut pool = self.rec_sessions.lock().map_err(|e| format!("{}", e))?;
+            loop {
+                if let Some(s) = pool.pop_front() {
+                    break s;
+                }
+                // Wait until a session is returned to the pool
+                pool = self.rec_sessions_cvar.wait(pool).map_err(|e| format!("{}", e))?;
+            }
+        };
+
+        let result = rec::run_recognition(&mut session, &data, width, self.rec_height, &self.rec_input, &self.rec_output)
+            .map_err(|e| e.to_string());
+
+        // Always return session to pool and notify waiters
+        {
+            let mut pool = self.rec_sessions.lock().map_err(|e| format!("{}", e))?;
+            pool.push_back(session);
+            self.rec_sessions_cvar.notify_one();
+        }
+
+        let probs = result?;
         Ok(decode::ctc_decode(&probs, &self.keys))
     }
 
-    pub fn recognize_all(&self, image: &DynamicImage) -> Result<Vec<OcrBlock>, Box<dyn std::error::Error>> {
+    pub fn recognize_all(&self, image: &DynamicImage) -> Result<Vec<OcrBlock>, String> {
         let regions = self.detect_text_regions(image)?;
         if regions.is_empty() {
             if let Some(block) = self.recognize_full_image(image)? {
@@ -116,24 +161,27 @@ impl OcrEngine {
             return Ok(Vec::new());
         }
 
-        let mut blocks = Vec::with_capacity(regions.len());
-        for region in &regions {
-            let decoded = self.recognize_text(image, region)?;
-            let (x, y, w, h) = bbox_to_rect(&region.bbox);
-            blocks.push(OcrBlock {
-                text: decoded.text,
-                confidence: decoded.score,
-                x,
-                y,
-                width: w,
-                height: h,
-            });
-        }
+        let mut blocks = regions
+            .par_iter()
+            .map(|region| {
+                let decoded = self.recognize_text(image, region)?;
+                let (x, y, w, h) = bbox_to_rect(&region.bbox);
+                Ok::<OcrBlock, String>(OcrBlock {
+                    text: decoded.text,
+                    confidence: decoded.score,
+                    x,
+                    y,
+                    width: w,
+                    height: h,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
         blocks.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
         Ok(blocks)
     }
 
-    fn recognize_full_image(&self, image: &DynamicImage) -> Result<Option<OcrBlock>, Box<dyn std::error::Error>> {
+    fn recognize_full_image(&self, image: &DynamicImage) -> Result<Option<OcrBlock>, String> {
         let width = image.width() as f32;
         let height = image.height() as f32;
         if width < 1.0 || height < 1.0 {

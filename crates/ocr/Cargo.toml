@@ -9,3 +9,4 @@ image = "0.25"
 imageproc = "0.27"
 geo = "0.33"
 serde = { version = "1", features = ["derive"] }
+rayon = "1"
