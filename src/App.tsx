@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import "./App.css";
@@ -28,6 +28,17 @@ function App() {
 	const [currentPage, setCurrentPage] = useState(0);
 	const [fileName, setFileName] = useState("");
 	const [filePath, setFilePath] = useState("");
+	const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+	const [searchQuery, setSearchQuery] = useState("");
+
+	// Zoom: absolute scale (1 = native pixels, 0.5 = half, 2 = double)
+	const [zoomLevel, setZoomLevel] = useState(1);
+	// Display size in CSS px — drives img/canvas/container layout
+	const [displaySize, setDisplaySize] = useState({ w: 0, h: 0 });
+
+	const ZOOM_STEP = 0.1;
+	const ZOOM_MIN = 0.1;
+	const ZOOM_MAX = 10;
 
 	// model switching
 	const [models, setModels] = useState<string[]>([]);
@@ -35,6 +46,7 @@ function App() {
 
 	const imgRef = useRef<HTMLImageElement>(null);
 	const canvasRef = useRef<HTMLCanvasElement>(null);
+	const containerRef = useRef<HTMLDivElement>(null);
 	const rawBase64Ref = useRef<string>("");
 
 	useEffect(() => {
@@ -141,32 +153,151 @@ function App() {
 		}
 	};
 
+	function getConfidenceColor(conf: number): string {
+		if (conf >= 0.9) return "#4ade80"; // green
+		if (conf >= 0.7) return "#facc15"; // yellow
+		if (conf >= 0.5) return "#fb923c"; // orange
+		return "#ef4444"; // red
+	}
+
+	function drawOcrBlock(
+		ctx: CanvasRenderingContext2D,
+		block: OcrBlock,
+		index: number,
+		isHighlighted: boolean
+	) {
+		const { x, y, width, height, confidence, text } = block;
+		const color = getConfidenceColor(confidence);
+		const confPct = (confidence * 100).toFixed(1) + "%";
+		const FONT_SIZE = 20;
+		const PAD = 3;
+
+		// Draw rectangle
+		ctx.strokeStyle = isHighlighted ? "#ffffff" : color;
+		ctx.lineWidth = isHighlighted ? 3 : 2;
+		ctx.strokeRect(x, y, width, height);
+
+		ctx.font = `${FONT_SIZE}px sans-serif`;
+		ctx.textBaseline = "top";
+		const textH = FONT_SIZE;
+
+		// --- Top-right outside: index number ---
+		const idxText = `${index + 1}`;
+		const idxW = ctx.measureText(idxText).width;
+		ctx.fillStyle = "rgba(0,0,0,0.65)";
+		ctx.fillRect(x + width + PAD, y + PAD, idxW + PAD * 2, textH + PAD * 2);
+		ctx.fillStyle = color;
+		ctx.fillText(idxText, x + width + PAD * 2, y + PAD * 2);
+
+		// --- Top-left outside: confidence (right-aligned) ---
+		const confW = ctx.measureText(confPct).width;
+		const confLabelX = x - PAD - confW - PAD * 2;
+		ctx.fillStyle = "rgba(0,0,0,0.65)";
+		ctx.fillRect(confLabelX - PAD, y + PAD, confW + PAD * 2 + 2, textH + PAD * 2);
+		ctx.fillStyle = color;
+		ctx.fillText(confPct, confLabelX, y + PAD * 2);
+
+		// --- Bottom-right outside: recognized text ---
+		ctx.textBaseline = "bottom";
+		const textY = y + height + PAD;
+		const maxTextW = Math.min(600, width * 2);
+		let displayText = text;
+		if (ctx.measureText(displayText).width > maxTextW) {
+			while (displayText.length > 1 && ctx.measureText(displayText + "...").width > maxTextW) {
+				displayText = displayText.slice(0, -1);
+			}
+			displayText += "...";
+		}
+		const textW = ctx.measureText(displayText).width;
+		ctx.fillStyle = "rgba(0,0,0,0.65)";
+		ctx.fillRect(x + PAD, textY + PAD, textW + PAD * 2 + 2, textH + PAD * 2);
+		ctx.fillStyle = "#ffffff";
+		ctx.fillText(displayText, x + PAD * 2, textY + PAD * 2 + textH);
+	}
+
+	// Draw canvas overlay when blocks or selection changes
 	useEffect(() => {
 		const img = imgRef.current;
 		const canvas = canvasRef.current;
-		if (!img || !canvas || blocks.length === 0) {
-			if (canvas) {
-				const ctx = canvas.getContext("2d");
-				ctx?.clearRect(0, 0, canvas.width, canvas.height);
-			}
-			return;
-		}
+		if (!img || !canvas) return;
 
 		canvas.width = img.naturalWidth;
 		canvas.height = img.naturalHeight;
 		const ctx = canvas.getContext("2d")!;
 		ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-		ctx.strokeStyle = "#00ff00";
-		ctx.lineWidth = 2;
-		ctx.font = "16px sans-serif";
-		ctx.fillStyle = "#00ff00";
+		if (blocks.length === 0) return;
 
-		for (const block of blocks) {
-			ctx.strokeRect(block.x, block.y, block.width, block.height);
-			ctx.fillText(block.text, block.x, Math.max(block.y - 4, 16));
+		for (let i = 0; i < blocks.length; i++) {
+			drawOcrBlock(ctx, blocks[i], i, selectedIndex === i);
 		}
-	}, [blocks]);
+	}, [blocks, selectedIndex]);
+
+	// On image load: compute initial fit-zoom
+	useEffect(() => {
+		const img = imgRef.current;
+		const container = containerRef.current;
+		if (!img || !container) return;
+
+		const onLoad = () => {
+			const nw = img.naturalWidth;
+			const nh = img.naturalHeight;
+			if (nw === 0) return;
+			// Fit to container width with small padding, cap height to 80vh
+			const maxW = container.clientWidth - 8;
+			const maxH = window.innerHeight * 0.75;
+			const fit = Math.min(1, maxW / nw, maxH / nh);
+			setZoomLevel(fit);
+			setDisplaySize({ w: nw * fit, h: nh * fit });
+		};
+
+		if (img.complete && img.naturalWidth > 0) {
+			onLoad();
+		} else {
+			img.addEventListener("load", onLoad);
+			return () => img.removeEventListener("load", onLoad);
+		}
+	// We intentionally only run this when imageDataUrl changes
+	// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [imageDataUrl]);
+
+	// When zoomLevel changes, update displaySize
+	useEffect(() => {
+		const img = imgRef.current;
+		if (!img || img.naturalWidth === 0) return;
+		setDisplaySize({ w: img.naturalWidth * zoomLevel, h: img.naturalHeight * zoomLevel });
+	}, [zoomLevel]);
+
+	const handleZoomDelta = useCallback((delta: number) => {
+		const img = imgRef.current;
+		if (!img) return;
+		const nw = img.naturalWidth;
+		const nh = img.naturalHeight;
+		if (nw === 0) return;
+		setZoomLevel(z => {
+			const next = z + delta;
+			const clamped = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Math.round(next / ZOOM_STEP) * ZOOM_STEP));
+			setDisplaySize({ w: nw * clamped, h: nh * clamped });
+			return clamped;
+		});
+	}, []);
+
+	const zoomIn = useCallback(() => handleZoomDelta(ZOOM_STEP), [handleZoomDelta]);
+	const zoomOut = useCallback(() => handleZoomDelta(-ZOOM_STEP), [handleZoomDelta]);
+
+	const resetZoom = useCallback(() => {
+		const img = imgRef.current;
+		const container = containerRef.current;
+		if (!img || !container) return;
+		const nw = img.naturalWidth;
+		const nh = img.naturalHeight;
+		if (nw === 0) return;
+		const maxW = container.clientWidth - 8;
+		const maxH = window.innerHeight * 0.75;
+		const fit = Math.min(1, maxW / nw, maxH / nh);
+		setZoomLevel(fit);
+		setDisplaySize({ w: nw * fit, h: nh * fit });
+	}, []);
 
 	const switchPage = (pageIdx: number) => {
 		const page = pages[pageIdx];
@@ -187,6 +318,15 @@ function App() {
 				<button onClick={handleRecognize} disabled={!imageDataUrl || loading}>
 					{loading ? "识别中..." : "识别"}
 				</button>
+
+				{imageDataUrl && (
+					<div className="zoom-controls">
+						<button onClick={zoomOut} disabled={zoomLevel <= ZOOM_MIN} title="缩小">-</button>
+						<span className="zoom-label">{(zoomLevel * 100).toFixed(0)}%</span>
+						<button onClick={zoomIn} disabled={zoomLevel >= ZOOM_MAX} title="放大">+</button>
+						<button onClick={resetZoom} className="zoom-reset-btn">还原</button>
+					</div>
+				)}
 
 				{models.length > 1 && (
 					<div className="model-selector">
@@ -228,23 +368,66 @@ function App() {
 			)}
 
 			{imageDataUrl && (
-				<div className="image-container">
-					<img ref={imgRef} src={imageDataUrl} alt="OCR input" />
-					<canvas ref={canvasRef} />
+				<div className="image-container" ref={containerRef}>
+					<div className="image-viewport" style={{ width: displaySize.w || undefined, height: displaySize.h || undefined }}>
+						<img
+							ref={imgRef}
+							src={imageDataUrl}
+							alt="OCR input"
+							draggable={false}
+							style={{ width: displaySize.w || undefined, height: displaySize.h || undefined }}
+						/>
+						<canvas
+							ref={canvasRef}
+							style={{ width: displaySize.w || undefined, height: displaySize.h || undefined }}
+						/>
+					</div>
 				</div>
 			)}
 
 			{blocks.length > 0 && (
 				<div className="results">
-					<h2>识别结果 ({blocks.length} 项)</h2>
-					{blocks.map((b, i) => (
-						<div key={i} className="result-item">
-							<span className="result-text">{b.text}</span>
-							<span className="result-conf">
-								{(b.confidence * 100).toFixed(1)}%
-							</span>
-						</div>
-					))}
+					<div className="results-header">
+						<h2>识别结果 ({blocks.length} 项)</h2>
+						<input
+							type="text"
+							className="search-input"
+							placeholder="搜索文字..."
+							value={searchQuery}
+							onChange={(e) => setSearchQuery(e.target.value)}
+						/>
+					</div>
+					{(() => {
+						const filtered = searchQuery
+							? blocks.filter((b) =>
+									b.text.toLowerCase().includes(searchQuery.toLowerCase())
+							  )
+							: blocks;
+						if (filtered.length === 0) {
+							return <div className="no-results">未找到匹配项</div>;
+						}
+						return filtered.map((b) => {
+							const origIndex = blocks.indexOf(b);
+							return (
+								<div
+									key={origIndex}
+									className={`result-item${selectedIndex === origIndex ? " selected" : ""}`}
+									onClick={() =>
+										setSelectedIndex(selectedIndex === origIndex ? null : origIndex)
+									}
+								>
+									<span className="result-idx">{origIndex + 1}</span>
+									<span className="result-text">{b.text}</span>
+									<span
+										className="result-conf"
+										style={{ color: getConfidenceColor(b.confidence) }}
+									>
+										{(b.confidence * 100).toFixed(1)}%
+									</span>
+								</div>
+							);
+						});
+					})()}
 				</div>
 			)}
 		</div>
