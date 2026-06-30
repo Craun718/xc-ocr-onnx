@@ -4,6 +4,8 @@ pub struct DecodedText {
     pub score: f32,
 }
 
+use log::warn;
+
 /// CTC decode: blank=0, characters start at index 1.
 /// Collapse repeats, remove blanks, and average kept character scores.
 pub fn ctc_decode(probs: &[Vec<f32>], keys: &[String]) -> DecodedText {
@@ -34,7 +36,7 @@ pub fn ctc_decode(probs: &[Vec<f32>], keys: &[String]) -> DecodedText {
     }
 
     if dropped > 0 {
-        eprintln!(
+        warn!(
             "[ctc_decode] dropped {} out-of-range indices (keys: {}, max max_idx seen: {}).",
             dropped,
             keys.len(),

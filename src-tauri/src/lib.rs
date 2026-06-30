@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::Manager;
+use log::{info, warn};
 
 use base64::Engine;
 use serde::Serialize;
@@ -64,7 +65,7 @@ fn recognize_image(
     let guard = state.engine.lock().map_err(|e| e.to_string())?;
     let engine = guard.as_ref().ok_or("OCR engine not initialized")?;
     let img = decode_base64_image(&data)?;
-    eprintln!("[xc-ocr] 识别图片: {}, 尺寸: {}x{} px, base64: {} bytes",
+    info!("[xc-ocr] 识别图片: {}, 尺寸: {}x{} px, base64: {} bytes",
         filename, img.width(), img.height(), data.len());
 
     // 自动矫正文档方向
@@ -74,7 +75,7 @@ fn recognize_image(
                 Ok((corrected, result)) => {
                     let angle = result.orientation.angle();
                     if angle != 0 {
-                        eprintln!("[xc-ocr] 自动旋转: {}° -> 0°, 置信度: {:.3}",
+                        info!("[xc-ocr] 自动旋转: {}° -> 0°, 置信度: {:.3}",
                             angle, result.confidence);
                         // 返回矫正后的图像 base64
                         let corrected_b64 = encode_png_base64(&corrected.to_rgba8())
@@ -85,7 +86,7 @@ fn recognize_image(
                     }
                 }
                 Err(e) => {
-                    eprintln!("[xc-ocr] 方向检测失败: {}, 使用原图", e);
+                    warn!("[xc-ocr] 方向检测失败: {}, 使用原图", e);
                     (img, 0, None)
                 }
             }
@@ -97,9 +98,9 @@ fn recognize_image(
     };
 
     let blocks = engine.recognize_all(&img).map_err(|e| e.to_string())?;
-    eprintln!("[xc-ocr] 识别完成: {}, {} 个文本块", filename, blocks.len());
+    info!("[xc-ocr] 识别完成: {}, {} 个文本块", filename, blocks.len());
     for (i, b) in blocks.iter().enumerate() {
-        eprintln!("[xc-ocr]   [{:>3}] conf={:.3} text={}", i, b.confidence, b.text);
+        info!("[xc-ocr]   [{:>3}] conf={:.3} text={}", i, b.confidence, b.text);
     }
     Ok(RecognizeResult {
         blocks,
@@ -115,9 +116,9 @@ fn render_docx(
     data: String,
 ) -> Result<Vec<PageImage>, String> {
     let docx_bytes = decode_base64(&data)?;
-    eprintln!("[xc-ocr] 导入 DOCX: {}, 大小: {} bytes", filename, docx_bytes.len());
+    info!("[xc-ocr] 导入 DOCX: {}, 大小: {} bytes", filename, docx_bytes.len());
     let page_info = state.renderer.page_info(&docx_bytes);
-    eprintln!(
+    info!(
         "[xc-ocr] DOCX 页面信息: {}x{} TWIP ({}x{} px), 方向: {}",
         page_info.width_twip, page_info.height_twip,
         page_info.width_px, page_info.height_px,
@@ -147,9 +148,9 @@ fn pdf_page_count(
     data: String,
 ) -> Result<usize, String> {
     let pdf_bytes = decode_base64(&data)?;
-    eprintln!("[xc-ocr] 获取 PDF 页数, 大小: {} bytes", pdf_bytes.len());
+    info!("[xc-ocr] 获取 PDF 页数, 大小: {} bytes", pdf_bytes.len());
     let count = state.renderer.pdf_page_count(&pdf_bytes).map_err(|e| e.to_string())?;
-    eprintln!("[xc-ocr] PDF 页数: {}", count);
+    info!("[xc-ocr] PDF 页数: {}", count);
     Ok(count)
 }
 
@@ -160,7 +161,7 @@ fn render_pdf_page(
     page: usize,
 ) -> Result<PageImage, String> {
     let pdf_bytes = decode_base64(&data)?;
-    eprintln!("[xc-ocr] 渲染 PDF 第 {} 页, 大小: {} bytes", page + 1, pdf_bytes.len());
+    info!("[xc-ocr] 渲染 PDF 第 {} 页, 大小: {} bytes", page + 1, pdf_bytes.len());
     let img = state.renderer.render_pdf_page(&pdf_bytes, page).map_err(|e| e.to_string())?;
     let image_data = encode_png_base64(&img)?;
     let orientation = if img.width() > img.height() { "landscape" } else { "portrait" };
@@ -369,6 +370,15 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(
+            tauri_plugin_log::Builder::default()
+                .targets([
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir { file_name: None }),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Webview),
+                ])
+                .build(),
+        )
         .setup(|app| {
             let default_variant = "v4";
             let (det_bytes, rec_bytes, keys_bytes) =
@@ -380,9 +390,9 @@ pub fn run() {
             // 加载文档方向分类器
             let orientation_classifier = load_doc_ori_classifier(&app.handle()).ok();
             if orientation_classifier.is_some() {
-                eprintln!("[xc-ocr] 方向分类器加载成功");
+                info!("[xc-ocr] 方向分类器加载成功");
             } else {
-                eprintln!("[xc-ocr] 方向分类器加载失败，将跳过自动旋转");
+                warn!("[xc-ocr] 方向分类器加载失败，将跳过自动旋转");
             }
 
             let mut renderer = docx_to_image::DocxRenderer::new();

@@ -4,6 +4,7 @@ use std::process::Command;
 
 use image::RgbaImage;
 use tempfile::TempDir;
+use log::info;
 
 use crate::error::DocxToImageError;
 
@@ -97,7 +98,7 @@ impl DocxRenderer {
         // detect page info from original DOCX (TWIPs → pixels, orientation)
         // 用原始 bytes 检测，方向信息不受预处理影响
         let page_info = detect_page_info(docx_bytes, self.dpi);
-        eprintln!(
+        info!(
             "[docx-to-image] DOCX 页面尺寸: {}x{} TWIP ({}x{} px @ {} DPI), 方向: {:?}",
             page_info.width_twip, page_info.height_twip,
             page_info.width_px, page_info.height_px,
@@ -257,7 +258,7 @@ impl DocxRenderer {
             out_pattern.display().to_string(),
             pdf_path.display().to_string(),
         ];
-        eprintln!("[docx-to-image] 调用 Ghostscript: {} {}", gs.display(), args.join(" "));
+        info!("[docx-to-image] 调用 Ghostscript: {} {}", gs.display(), args.join(" "));
 
         let output = Command::new(&gs)
             .args(&args)
@@ -266,7 +267,7 @@ impl DocxRenderer {
         if !output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!("[docx-to-image] Ghostscript 失败: stdout={}, stderr={}", stdout, stderr);
+            info!("[docx-to-image] Ghostscript 失败: stdout={}, stderr={}", stdout, stderr);
             return Err(DocxToImageError::CommandFailed {
                 cmd: format!("{} {}", gs.display(), args.join(" ")),
                 code: output.status.code().unwrap_or(-1),
@@ -280,7 +281,7 @@ impl DocxRenderer {
             .filter(|e| e.path().extension().map(|ext| ext == "png").unwrap_or(false))
             .count();
 
-        eprintln!("[docx-to-image] PDF 页数: {}", count);
+        info!("[docx-to-image] PDF 页数: {}", count);
         Ok(count)
     }
 
@@ -309,7 +310,7 @@ impl DocxRenderer {
             out_path.display().to_string(),
             pdf_path.display().to_string(),
         ];
-        eprintln!("[docx-to-image] 调用 Ghostscript: {} {}", gs.display(), args.join(" "));
+        info!("[docx-to-image] 调用 Ghostscript: {} {}", gs.display(), args.join(" "));
 
         let output = Command::new(&gs)
             .args(&args)
@@ -318,7 +319,7 @@ impl DocxRenderer {
         if !output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!("[docx-to-image] Ghostscript 页面渲染失败: stdout={}, stderr={}", stdout, stderr);
+            info!("[docx-to-image] Ghostscript 页面渲染失败: stdout={}, stderr={}", stdout, stderr);
             return Err(DocxToImageError::CommandFailed {
                 cmd: format!("{} {}", gs.display(), args.join(" ")),
                 code: output.status.code().unwrap_or(-1),
@@ -330,7 +331,7 @@ impl DocxRenderer {
             .map_err(|e| DocxToImageError::Image(e.to_string()))?
             .into_rgba8();
 
-        eprintln!(
+        info!(
             "[docx-to-image] PDF 第 {} 页渲染完成: {}x{} px @ {} DPI",
             gs_page, img.width(), img.height(), self.dpi
         );
@@ -395,20 +396,20 @@ impl DocxRenderer {
             let empty_p_count = content.matches("<p></p>").count();
             let nbsp_p_count = content.matches("<p>&nbsp;").count();
             let br_count = content.matches("<br").count();
-            eprintln!(
+            info!(
                 "[docx-to-image] HTML 统计: {} 个 <p>, {} 个空 <p>, {} 个 <p>&nbsp;, {} 个 <br>",
                 p_count, empty_p_count, nbsp_p_count, br_count,
             );
             let debug_path = std::env::temp_dir().join("xc-ocr-debug_output.html");
             let _ = std::fs::write(&debug_path, &content);
-            eprintln!("[docx-to-image] HTML 已保存到: {}", debug_path.display());
+            info!("[docx-to-image] HTML 已保存到: {}", debug_path.display());
         }
 
         let png_path = out_dir.join("output.png");
         // wkhtmltoimage uses CSS pixels (96 DPI): TWIP → CSS px = TWIP * 96 / 1440 = TWIP / 15
         let css_w = page_info.width_twip / 15;
         let css_h = page_info.height_twip / 15;
-        eprintln!(
+        info!(
             "[docx-to-image] wkhtmltoimage viewport: {}x{} px (from {}x{} TWIP)",
             css_w, css_h, page_info.width_twip, page_info.height_twip,
         );
@@ -433,7 +434,7 @@ impl DocxRenderer {
         let img = image::open(&png_path)
             .map_err(|e| DocxToImageError::Image(e.to_string()))?
             .into_rgba8();
-        eprintln!(
+        info!(
             "[docx-to-image] wkhtmltoimage 输出: {}x{} px (CSS 宽度: {} px)",
             img.width(), img.height(), css_w,
         );
@@ -494,7 +495,7 @@ impl DocxRenderer {
 
         let pages = self.run_gs_to_png(gs, &pdf_path, out_dir)?;
         for (i, p) in pages.iter().enumerate() {
-            eprintln!(
+            info!(
                 "[docx-to-image] GS 输出第 {} 页: {}x{} px",
                 i + 1, p.width(), p.height(),
             );
@@ -607,7 +608,7 @@ fn fix_empty_paragraphs_xml(xml: &str) -> String {
             }
         })
         .to_string();
-    eprintln!("[docx-to-image] fix_empty_paragraphs_xml: 注入 {} 个空格 run", injected);
+    info!("[docx-to-image] fix_empty_paragraphs_xml: 注入 {} 个空格 run", injected);
     result
 }
 

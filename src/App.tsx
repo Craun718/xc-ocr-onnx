@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { info, error } from "@tauri-apps/plugin-log";
 import "./App.css";
 
 interface OcrBlock {
@@ -63,8 +64,11 @@ function App() {
 			.then((list) => {
 				setModels(list);
 				if (list.length > 0) setCurrentModel(list[0]);
+				info(`[前端] 可用模型: ${list.join(", ")}`);
 			})
-			.catch(console.error);
+			.catch((err) => {
+				error(`[前端] 获取模型列表失败: ${err}`);
+			});
 	}, []);
 
 	const handleModelChange = async (variant: string) => {
@@ -72,7 +76,9 @@ function App() {
 		setBlocks([]);
 		try {
 			await invoke("switch_model", { variant });
+			info(`[前端] 切换模型: ${variant}`);
 		} catch (err) {
+			error(`[前端] 切换模型失败: ${err}`);
 			alert("切换模型失败: " + err);
 		}
 	};
@@ -115,6 +121,7 @@ function App() {
 		try {
 			const dataUrl = await invoke<string>("read_file_as_data_url", { path });
 			rawBase64Ref.current = dataUrl;
+			info(`[前端] 读取文件: ${name}`);
 
 			if (name.endsWith(".pdf")) {
 				setFileType("pdf");
@@ -154,6 +161,7 @@ function App() {
 				setImageDataUrl(dataUrl);
 			}
 		} catch (err) {
+			error(`[前端] 读取文件失败: ${err}`);
 			alert("读取文件失败: " + err);
 		} finally {
 			setLoading(false);
@@ -190,6 +198,7 @@ function App() {
 
 			setBlocks(result.blocks);
 		} catch (err) {
+			error(`[前端] OCR 识别失败: ${err}`);
 			alert("OCR 识别失败: " + err);
 		} finally {
 			setLoading(false);

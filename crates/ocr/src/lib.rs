@@ -1,6 +1,7 @@
 use std::sync::Mutex;
 use std::collections::VecDeque;
 use rayon::prelude::*;
+use log::{info, warn};
 
 mod det;
 mod decode;
@@ -73,14 +74,14 @@ impl OcrEngine {
             .and_then(|s| s.last())
             .copied()
             .unwrap_or(0) as usize;
-        eprintln!(
+        info!(
             "[ocr] keys: {} lines, model output classes: {} (blank + {} chars)",
             keys.len(),
             model_classes,
             model_classes.saturating_sub(1),
         );
         if keys.len() + 1 != model_classes {
-            eprintln!(
+            warn!(
                 "[ocr] WARNING: keys({}) + 1(blank) = {} != model_classes({})",
                 keys.len(),
                 keys.len() + 1,
@@ -95,7 +96,7 @@ impl OcrEngine {
                 .unwrap_or(2),
             4,
         );
-        eprintln!("[ocr] creating rec session pool of size {}", pool_size);
+        info!("[ocr] creating rec session pool of size {}", pool_size);
 
         let mut sessions = VecDeque::with_capacity(pool_size);
         sessions.push_back(rec_session);
@@ -270,7 +271,7 @@ impl DocOrientationClassifier {
             .tensor_shape()
             .cloned()
             .unwrap_or_default();
-        eprintln!(
+        info!(
             "[doc_ori] model loaded: input {:?}, output {:?}",
             input_shape, output_shape
         );
