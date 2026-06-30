@@ -139,6 +139,40 @@ fn render_docx(
     Ok(results)
 }
 
+// ── PDF commands ─────────────────────────────────────────────────
+
+#[tauri::command]
+fn pdf_page_count(
+    state: tauri::State<OcrState>,
+    data: String,
+) -> Result<usize, String> {
+    let pdf_bytes = decode_base64(&data)?;
+    eprintln!("[xc-ocr] 获取 PDF 页数, 大小: {} bytes", pdf_bytes.len());
+    let count = state.renderer.pdf_page_count(&pdf_bytes).map_err(|e| e.to_string())?;
+    eprintln!("[xc-ocr] PDF 页数: {}", count);
+    Ok(count)
+}
+
+#[tauri::command]
+fn render_pdf_page(
+    state: tauri::State<OcrState>,
+    data: String,
+    page: usize,
+) -> Result<PageImage, String> {
+    let pdf_bytes = decode_base64(&data)?;
+    eprintln!("[xc-ocr] 渲染 PDF 第 {} 页, 大小: {} bytes", page + 1, pdf_bytes.len());
+    let img = state.renderer.render_pdf_page(&pdf_bytes, page).map_err(|e| e.to_string())?;
+    let image_data = encode_png_base64(&img)?;
+    let orientation = if img.width() > img.height() { "landscape" } else { "portrait" };
+    Ok(PageImage {
+        page,
+        width: img.width(),
+        height: img.height(),
+        orientation: orientation.to_string(),
+        image_data,
+    })
+}
+
 // ── model commands ─────────────────────────────────────────────────
 
 #[tauri::command]
@@ -367,6 +401,8 @@ pub fn run() {
             read_file_as_data_url,
             recognize_image,
             render_docx,
+            pdf_page_count,
+            render_pdf_page,
             list_models,
             switch_model,
         ])

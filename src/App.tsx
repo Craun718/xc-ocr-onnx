@@ -22,6 +22,7 @@ interface PageImage {
 	page: number;
 	width: number;
 	height: number;
+	orientation: string;
 	image_data: string;
 }
 
@@ -29,9 +30,11 @@ function App() {
 	const [imageDataUrl, setImageDataUrl] = useState<string | null>(null);
 	const [blocks, setBlocks] = useState<OcrBlock[]>([]);
 	const [loading, setLoading] = useState(false);
-	const [fileType, setFileType] = useState<"image" | "docx" | null>(null);
-	const [pages, setPages] = useState<PageImage[]>([]);
+	const [fileType, setFileType] = useState<"image" | "docx" | "pdf" | null>(null);
+	const [pages, setPages] = useState<(PageImage | null)[]>([]);
+	const [pageCount, setPageCount] = useState(0);
 	const [currentPage, setCurrentPage] = useState(0);
+	const [pdfData, setPdfData] = useState<string | null>(null); // 缓存 PDF base64 数据
 	const [fileName, setFileName] = useState("");
 	const [filePath, setFilePath] = useState("");
 	const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
@@ -89,6 +92,7 @@ function App() {
 						"tif",
 						"webp",
 						"docx",
+						"pdf",
 					],
 				},
 			],
@@ -104,13 +108,37 @@ function App() {
 		setPages([]);
 		setCurrentPage(0);
 		setImageDataUrl(null);
+		setPdfData(null);
+		setPageCount(0);
 		setLoading(true);
 
 		try {
 			const dataUrl = await invoke<string>("read_file_as_data_url", { path });
 			rawBase64Ref.current = dataUrl;
 
-			if (name.endsWith(".docx")) {
+			if (name.endsWith(".pdf")) {
+				setFileType("pdf");
+				setPdfData(dataUrl);
+				// 获取 PDF 页数
+				const count = await invoke<number>("pdf_page_count", { data: dataUrl });
+				setPageCount(count);
+				// 初始化页面数组（全部为 null，等待懒加载）
+				setPages(new Array(count).fill(null));
+				// 渲染第一页
+				if (count > 0) {
+					const firstPage: PageImage = await invoke("render_pdf_page", {
+						data: dataUrl,
+						page: 0,
+					});
+					setPages(prev => {
+						const newPages = [...prev];
+						newPages[0] = firstPage;
+						return newPages;
+					});
+					setImageDataUrl(firstPage.image_data);
+					setCurrentPage(0);
+				}
+			} else if (name.endsWith(".docx")) {
 				setFileType("docx");
 				const result: PageImage[] = await invoke("render_docx", {
 					filename: path,
@@ -138,12 +166,12 @@ function App() {
 		setBlocks([]);
 		try {
 			const inputData =
-				fileType === "docx" && pages[currentPage]
-					? pages[currentPage].image_data
+				(fileType === "docx" || fileType === "pdf") && pages[currentPage]
+					? pages[currentPage]!.image_data
 					: rawBase64Ref.current;
 
 			const label =
-				fileType === "docx"
+				fileType === "docx" || fileType === "pdf"
 					? `${filePath} - 第 ${currentPage + 1} 页`
 					: filePath;
 
@@ -314,14 +342,50 @@ function App() {
 		setDisplaySize({ w: nw * fit, h: nh * fit });
 	}, []);
 
-	const switchPage = (pageIdx: number) => {
-		const page = pages[pageIdx];
-		if (page) {
-			setImageDataUrl(page.image_data);
-			setBlocks([]);
-			setCurrentPage(pageIdx);
+	const switchPage = async (pageIdx: number) => {
+		// 对于 PDF，检查页面是否已缓存
+		if (fileType === "pdf") {
+			const cachedPage = pages[pageIdx];
+			if (cachedPage) {
+				// 已缓存，直接显示
+				setImageDataUrl(cachedPage.image_data);
+				setBlocks([]);
+				setCurrentPage(pageIdx);
+			} else if (pdfData) {
+				// 未缓存，渲染页面
+				setLoading(true);
+				try {
+					const renderedPage: PageImage = await invoke("render_pdf_page", {
+						data: pdfData,
+						page: pageIdx,
+					});
+					setPages(prev => {
+						const newPages = [...prev];
+						newPages[pageIdx] = renderedPage;
+						return newPages;
+					});
+					setImageDataUrl(renderedPage.image_data);
+					setBlocks([]);
+					setCurrentPage(pageIdx);
+				} catch (err) {
+					alert("渲染页面失败: " + err);
+				} finally {
+					setLoading(false);
+				}
+			}
+		} else {
+			// DOCX：所有页面已预渲染
+			const page = pages[pageIdx];
+			if (page) {
+				setImageDataUrl(page.image_data);
+				setBlocks([]);
+				setCurrentPage(pageIdx);
+			}
 		}
 	};
+
+	// 计算实际页数（用于分页导航显示）
+	const totalPages = fileType === "pdf" ? pageCount : pages.length;
 
 	return (
 		<div className="app">
@@ -362,7 +426,7 @@ function App() {
 
 			{loading && <div className="loading-hint">处理中，请稍候...</div>}
 
-			{fileType === "docx" && pages.length > 0 && (
+			{(fileType === "docx" || fileType === "pdf") && totalPages > 0 && (
 				<div className="page-nav">
 					<button
 						disabled={currentPage === 0}
@@ -371,10 +435,10 @@ function App() {
 						上一页
 					</button>
 					<span>
-						第 {currentPage + 1} / {pages.length} 页
+						第 {currentPage + 1} / {totalPages} 页
 					</span>
 					<button
-						disabled={currentPage === pages.length - 1}
+						disabled={currentPage === totalPages - 1}
 						onClick={() => switchPage(currentPage + 1)}
 					>
 						下一页

@@ -232,6 +232,112 @@ impl DocxRenderer {
         load_png_pages(out_dir)
     }
 
+    // ─── PDF rendering ─────────────────────────────────────────────
+
+    /// 获取 PDF 文件的总页数
+    /// 使用 Ghostscript 渲染所有页面并统计生成的 PNG 文件数量
+    pub fn pdf_page_count(&self, pdf_bytes: &[u8]) -> Result<usize, DocxToImageError> {
+        let tmp = TempDir::new()?;
+        let pdf_path = tmp.path().join("input.pdf");
+        std::fs::write(&pdf_path, pdf_bytes)?;
+
+        let gs = self.find_gs().ok_or_else(|| {
+            DocxToImageError::NoTool("Ghostscript 未找到".into())
+        })?;
+
+        // 使用低 DPI 快速渲染来统计页数
+        let out_pattern = tmp.path().join("page_%d.png");
+        let args: Vec<String> = vec![
+            "-sDEVICE=png16m".to_string(),
+            "-r72x72".to_string(),
+            "-dNOPAUSE".to_string(),
+            "-dBATCH".to_string(),
+            "-dQUIET".to_string(),
+            "-o".to_string(),
+            out_pattern.display().to_string(),
+            pdf_path.display().to_string(),
+        ];
+        eprintln!("[docx-to-image] 调用 Ghostscript: {} {}", gs.display(), args.join(" "));
+
+        let output = Command::new(&gs)
+            .args(&args)
+            .output()?;
+
+        if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!("[docx-to-image] Ghostscript 失败: stdout={}, stderr={}", stdout, stderr);
+            return Err(DocxToImageError::CommandFailed {
+                cmd: format!("{} {}", gs.display(), args.join(" ")),
+                code: output.status.code().unwrap_or(-1),
+                stderr: if stderr.is_empty() { stdout.into() } else { stderr.into() },
+            });
+        }
+
+        // 统计生成的 PNG 文件数量
+        let count = std::fs::read_dir(tmp.path())?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map(|ext| ext == "png").unwrap_or(false))
+            .count();
+
+        eprintln!("[docx-to-image] PDF 页数: {}", count);
+        Ok(count)
+    }
+
+    /// 渲染 PDF 文件的指定页（页号从 0 开始，Ghostscript 页号从 1 开始）
+    pub fn render_pdf_page(&self, pdf_bytes: &[u8], page: usize) -> Result<RgbaImage, DocxToImageError> {
+        let tmp = TempDir::new()?;
+        let pdf_path = tmp.path().join("input.pdf");
+        std::fs::write(&pdf_path, pdf_bytes)?;
+
+        let gs = self.find_gs().ok_or_else(|| {
+            DocxToImageError::NoTool("Ghostscript 未找到".into())
+        })?;
+
+        let out_path = tmp.path().join("page.png");
+        let gs_page = page + 1; // Ghostscript 页号从 1 开始
+
+        let args: Vec<String> = vec![
+            "-sDEVICE=png16m".to_string(),
+            format!("-r{}x{}", self.dpi, self.dpi),
+            "-dNOPAUSE".to_string(),
+            "-dBATCH".to_string(),
+            "-dQUIET".to_string(),
+            format!("-dFirstPage={}", gs_page),
+            format!("-dLastPage={}", gs_page),
+            "-o".to_string(),
+            out_path.display().to_string(),
+            pdf_path.display().to_string(),
+        ];
+        eprintln!("[docx-to-image] 调用 Ghostscript: {} {}", gs.display(), args.join(" "));
+
+        let output = Command::new(&gs)
+            .args(&args)
+            .output()?;
+
+        if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!("[docx-to-image] Ghostscript 页面渲染失败: stdout={}, stderr={}", stdout, stderr);
+            return Err(DocxToImageError::CommandFailed {
+                cmd: format!("{} {}", gs.display(), args.join(" ")),
+                code: output.status.code().unwrap_or(-1),
+                stderr: if stderr.is_empty() { stdout.into() } else { stderr.into() },
+            });
+        }
+
+        let img = image::open(&out_path)
+            .map_err(|e| DocxToImageError::Image(e.to_string()))?
+            .into_rgba8();
+
+        eprintln!(
+            "[docx-to-image] PDF 第 {} 页渲染完成: {}x{} px @ {} DPI",
+            gs_page, img.width(), img.height(), self.dpi
+        );
+
+        Ok(img)
+    }
+
     /// 用 pandoc 将 DOCX 转 HTML5，再用 wkhtmltoimage 渲染成 PNG
 
     fn run_pandoc_wkhtml(

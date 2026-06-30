@@ -201,12 +201,14 @@ switch -Wildcard ($Platform) {
         if (Get-Command 7z -ErrorAction SilentlyContinue) {
             Write-Host "  extracting with 7z ..." -NoNewline
             & 7z x $exe -o"$WORK\_gs" -y *> $null
-            $found = Get-ChildItem -Path $WORK\_gs -Recurse -Filter "gswin64c.exe" | Select-Object -First 1
-            if ($found) {
-                Copy-Item $found.FullName (Join-Path $TargetDir "gswin64c.exe") -Force
-                Write-Host " OK" -ForegroundColor Green
+            $gsExe = Get-ChildItem -Path $WORK\_gs -Recurse -Filter "gswin64c.exe" | Select-Object -First 1
+            $gsDll = Get-ChildItem -Path $WORK\_gs -Recurse -Filter "gsdll64.dll" | Select-Object -First 1
+            if ($gsExe -and $gsDll) {
+                Copy-Item $gsExe.FullName (Join-Path $TargetDir "gswin64c.exe") -Force
+                Copy-Item $gsDll.FullName (Join-Path $TargetDir "gsdll64.dll") -Force
+                Write-Host " OK (gswin64c.exe + gsdll64.dll)" -ForegroundColor Green
             } else {
-                Write-Host " FAILED - gswin64c.exe not found in installer" -ForegroundColor Red
+                Write-Host " FAILED - gswin64c.exe or gsdll64.dll not found in installer" -ForegroundColor Red
             }
             Remove-Item $WORK\_gs -Recurse -Force -ErrorAction SilentlyContinue
         } else {
@@ -221,12 +223,14 @@ switch -Wildcard ($Platform) {
         if (Get-Command 7z -ErrorAction SilentlyContinue) {
             Write-Host "  extracting with 7z ..." -NoNewline
             & 7z x $exe -o"$WORK\_gs" -y *> $null
-            $found = Get-ChildItem -Path $WORK\_gs -Recurse -Filter "gswin32c.exe" | Select-Object -First 1
-            if ($found) {
-                Copy-Item $found.FullName (Join-Path $TargetDir "gswin32c.exe") -Force
-                Write-Host " OK" -ForegroundColor Green
+            $gsExe = Get-ChildItem -Path $WORK\_gs -Recurse -Filter "gswin32c.exe" | Select-Object -First 1
+            $gsDll = Get-ChildItem -Path $WORK\_gs -Recurse -Filter "gsdll32.dll" | Select-Object -First 1
+            if ($gsExe -and $gsDll) {
+                Copy-Item $gsExe.FullName (Join-Path $TargetDir "gswin32c.exe") -Force
+                Copy-Item $gsDll.FullName (Join-Path $TargetDir "gsdll32.dll") -Force
+                Write-Host " OK (gswin32c.exe + gsdll32.dll)" -ForegroundColor Green
             } else {
-                Write-Host " FAILED - gswin32c.exe not found in installer" -ForegroundColor Red
+                Write-Host " FAILED - gswin32c.exe or gsdll32.dll not found in installer" -ForegroundColor Red
             }
             Remove-Item $WORK\_gs -Recurse -Force -ErrorAction SilentlyContinue
         } else {
