@@ -178,24 +178,51 @@ fn render_pdf_page(
 
 #[tauri::command]
 fn list_models(app: tauri::AppHandle) -> Result<Vec<String>, String> {
-    find_models_root(&app)
-        .map(|dir| {
-            let mut variants: Vec<String> = std::fs::read_dir(&dir)
-                .ok()
-                .into_iter()
-                .flatten()
-                .filter_map(|e| {
-                    let path = e.ok()?;
-                    if path.file_type().ok()?.is_dir() {
-                        Some(path.file_name().to_string_lossy().to_string())
+    find_models_root(&app).map(|dir| {
+        let mut variants: Vec<String> = std::fs::read_dir(&dir)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| {
+                let path = e.ok()?;
+                if path.file_type().ok()?.is_dir() {
+                    let dir_name = path.file_name().to_string_lossy().to_string();
+                    // 检查是否有子目录作为规格
+                    let subdirs: Vec<String> = std::fs::read_dir(path.path())
+                        .ok()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|sub| {
+                            let sub_path = sub.ok()?;
+                            if sub_path.file_type().ok()?.is_dir() {
+                                Some(sub_path.file_name().to_string_lossy().to_string())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+
+                    if subdirs.is_empty() {
+                        // 无子目录，返回顶层目录名
+                        Some(vec![dir_name])
                     } else {
-                        None
+                        // 有子目录，返回复合名称 "v4/mobile" 格式
+                        Some(
+                            subdirs
+                                .into_iter()
+                                .map(|sub| format!("{}/{}", dir_name, sub))
+                                .collect(),
+                        )
                     }
-                })
-                .collect();
-            variants.sort();
-            variants
-        })
+                } else {
+                    None
+                }
+            })
+            .flatten()
+            .collect();
+        variants.sort();
+        variants
+    })
 }
 
 #[tauri::command]
@@ -204,26 +231,37 @@ fn switch_model(
     state: tauri::State<OcrState>,
     variant: String,
 ) -> Result<(), String> {
-    let model_dir = find_models_root(&app)?.join(&variant);
+    // 解析复合名称 (支持 "v4/mobile" 格式)
+    let (version, sub_variant) = if variant.contains('/') {
+        let parts: Vec<&str> = variant.split('/').collect();
+        (parts[0].to_string(), Some(parts[1].to_string()))
+    } else {
+        (variant.clone(), None)
+    };
 
-    // Check for subdirectories (mobile/server) or direct files
-    let (det_path, rec_path, keys_path) = if model_dir.join("det.onnx").is_file() {
+    let model_dir = find_models_root(&app)?.join(&version);
+
+    // 根据是否指定子规格决定路径
+    let (det_path, rec_path, keys_path) = if let Some(sub) = sub_variant {
+        // 直接使用指定的子目录
+        (
+            model_dir.join(&sub).join("det.onnx"),
+            model_dir.join(&sub).join("rec.onnx"),
+            model_dir.join(&sub).join("keys.txt"),
+        )
+    } else if model_dir.join("det.onnx").is_file() {
+        // 无子目录，直接在顶层目录查找
         (
             model_dir.join("det.onnx"),
             model_dir.join("rec.onnx"),
             model_dir.join("keys.txt"),
         )
     } else if model_dir.join("mobile").join("det.onnx").is_file() {
+        // 兼容旧逻辑：默认使用 mobile
         (
             model_dir.join("mobile").join("det.onnx"),
             model_dir.join("mobile").join("rec.onnx"),
             model_dir.join("mobile").join("keys.txt"),
-        )
-    } else if model_dir.join("server").join("rec.onnx").is_file() {
-        (
-            model_dir.join("mobile").join("det.onnx"),  // det is always from mobile
-            model_dir.join("server").join("rec.onnx"),
-            model_dir.join("server").join("keys.txt"),
         )
     } else {
         return Err(format!("模型目录 {variant} 中未找到模型文件"));
