@@ -5,6 +5,9 @@ use rayon::prelude::*;
 mod det;
 mod decode;
 mod rec;
+mod cls;
+
+pub use cls::{DocOrientation, OrientationResult, classify_orientation};
 
 use image::DynamicImage;
 use serde::{Deserialize, Serialize};
@@ -219,4 +222,108 @@ fn bbox_to_rect(bbox: &[[f32; 2]; 4]) -> (f32, f32, f32, f32) {
     let max_x = bbox.iter().map(|p| p[0]).reduce(f32::max).unwrap_or(0.0);
     let max_y = bbox.iter().map(|p| p[1]).reduce(f32::max).unwrap_or(0.0);
     (min_x, min_y, max_x - min_x, max_y - min_y)
+}
+
+/// Document orientation classifier using PP-LCNet_x1_0_doc_ori model.
+///
+/// This classifier detects the orientation of document images (0°, 90°, 180°, 270°).
+/// Useful for preprocessing documents before OCR when the scan/capture orientation
+/// is unknown.
+///
+/// # Example
+///
+/// ```ignore
+/// let model_data = std::fs::read("PP-LCNet_x1_0_doc_ori.onnx")?;
+/// let classifier = DocOrientationClassifier::new(&model_data)?;
+/// let result = classifier.classify(&image)?;
+/// println!("Orientation: {}°, confidence: {}", result.orientation.angle(), result.confidence);
+/// ```
+pub struct DocOrientationClassifier {
+    session: Mutex<ort::session::Session>,
+    input_name: String,
+    output_name: String,
+}
+
+impl DocOrientationClassifier {
+    /// Create a new orientation classifier from ONNX model data.
+    ///
+    /// # Arguments
+    /// * `model_data` - Raw ONNX model bytes (PP-LCNet_x1_0_doc_ori.onnx)
+    ///
+    /// # Returns
+    /// A new classifier instance ready to classify images.
+    pub fn new(model_data: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
+        let session = ort::session::Session::builder()?
+            .commit_from_memory(model_data)?;
+
+        let input_name = session.inputs()[0].name().to_string();
+        let output_name = session.outputs()[0].name().to_string();
+
+        // Log model info
+        let input_shape = session.inputs()[0]
+            .dtype()
+            .tensor_shape()
+            .cloned()
+            .unwrap_or_default();
+        let output_shape = session.outputs()[0]
+            .dtype()
+            .tensor_shape()
+            .cloned()
+            .unwrap_or_default();
+        eprintln!(
+            "[doc_ori] model loaded: input {:?}, output {:?}",
+            input_shape, output_shape
+        );
+
+        Ok(Self {
+            session: Mutex::new(session),
+            input_name,
+            output_name,
+        })
+    }
+
+    /// Classify the orientation of a document image.
+    ///
+    /// # Arguments
+    /// * `image` - The document image to classify
+    ///
+    /// # Returns
+    /// An `OrientationResult` containing the detected orientation and confidence score.
+    pub fn classify(&self, image: &DynamicImage) -> Result<OrientationResult, String> {
+        let mut session = self.session.lock().map_err(|e| format!("{}", e))?;
+        cls::classify_orientation(&mut session, image, &self.input_name, &self.output_name)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Rotate the image to correct its orientation.
+    ///
+    /// This is a convenience method that classifies the orientation and
+    /// returns a correctly oriented image.
+    ///
+    /// # Arguments
+    /// * `image` - The document image to correct
+    ///
+    /// # Returns
+    /// A tuple of (corrected_image, orientation_result).
+    pub fn correct_orientation(&self, image: &DynamicImage) -> Result<(DynamicImage, OrientationResult), String> {
+        let result = self.classify(image)?;
+
+        let corrected = match result.orientation {
+            DocOrientation::Upright => image.clone(),
+            DocOrientation::Rotate90 => {
+                // Rotate 90° counter-clockwise to correct
+                image.rotate270()
+            }
+            DocOrientation::Rotate180 => {
+                // Rotate 180° to correct
+                image.rotate180()
+            }
+            DocOrientation::Rotate270 => {
+                // Rotate 270° counter-clockwise (90° clockwise) to correct
+                image.rotate90()
+            }
+        };
+
+        Ok((corrected, result))
+    }
 }
