@@ -12,6 +12,12 @@ interface OcrBlock {
 	height: number;
 }
 
+interface RecognizeResult {
+	blocks: OcrBlock[];
+	corrected_image: string | null;
+	rotation_angle: number;
+}
+
 interface PageImage {
 	page: number;
 	width: number;
@@ -141,11 +147,20 @@ function App() {
 					? `${filePath} - 第 ${currentPage + 1} 页`
 					: filePath;
 
-			const result: OcrBlock[] = await invoke("recognize_image", {
+			const result: RecognizeResult = await invoke("recognize_image", {
 				filename: label,
 				data: inputData,
 			});
-			setBlocks(result);
+
+			// 如果检测到旋转并矫正了图像，更新显示的图像
+			if (result.corrected_image && result.rotation_angle > 0) {
+				setImageDataUrl(result.corrected_image);
+				if (fileType === "image") {
+					rawBase64Ref.current = result.corrected_image;
+				}
+			}
+
+			setBlocks(result.blocks);
 		} catch (err) {
 			alert("OCR 识别失败: " + err);
 		} finally {

@@ -16,6 +16,7 @@ pub struct PageImage {
 
 struct OcrState {
     engine: Mutex<Option<ocr::OcrEngine>>,
+    orientation_classifier: Mutex<Option<ocr::DocOrientationClassifier>>,
     renderer: docx_to_image::DocxRenderer,
 }
 
@@ -47,23 +48,64 @@ fn encode_png_base64(img: &image::RgbaImage) -> Result<String, String> {
     Ok(format!("data:image/png;base64,{}", b64))
 }
 
+#[derive(Serialize)]
+pub struct RecognizeResult {
+    blocks: Vec<ocr::OcrBlock>,
+    corrected_image: Option<String>,  // 矫正后的图像 base64（如果有旋转）
+    rotation_angle: u32,              // 检测到的旋转角度
+}
+
 #[tauri::command]
 fn recognize_image(
     state: tauri::State<OcrState>,
     filename: String,
     data: String,
-) -> Result<Vec<ocr::OcrBlock>, String> {
+) -> Result<RecognizeResult, String> {
     let guard = state.engine.lock().map_err(|e| e.to_string())?;
     let engine = guard.as_ref().ok_or("OCR engine not initialized")?;
     let img = decode_base64_image(&data)?;
     eprintln!("[xc-ocr] 识别图片: {}, 尺寸: {}x{} px, base64: {} bytes",
         filename, img.width(), img.height(), data.len());
+
+    // 自动矫正文档方向
+    let (img, rotation_angle, corrected_image) = if let Ok(classifier_guard) = state.orientation_classifier.lock() {
+        if let Some(classifier) = classifier_guard.as_ref() {
+            match classifier.correct_orientation(&img) {
+                Ok((corrected, result)) => {
+                    let angle = result.orientation.angle();
+                    if angle != 0 {
+                        eprintln!("[xc-ocr] 自动旋转: {}° -> 0°, 置信度: {:.3}",
+                            angle, result.confidence);
+                        // 返回矫正后的图像 base64
+                        let corrected_b64 = encode_png_base64(&corrected.to_rgba8())
+                            .map_err(|e| format!("编码矫正图像失败: {}", e))?;
+                        (corrected, angle, Some(corrected_b64))
+                    } else {
+                        (img, 0, None)
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[xc-ocr] 方向检测失败: {}, 使用原图", e);
+                    (img, 0, None)
+                }
+            }
+        } else {
+            (img, 0, None)
+        }
+    } else {
+        (img, 0, None)
+    };
+
     let blocks = engine.recognize_all(&img).map_err(|e| e.to_string())?;
     eprintln!("[xc-ocr] 识别完成: {}, {} 个文本块", filename, blocks.len());
     for (i, b) in blocks.iter().enumerate() {
         eprintln!("[xc-ocr]   [{:>3}] conf={:.3} text={}", i, b.confidence, b.text);
     }
-    Ok(blocks)
+    Ok(RecognizeResult {
+        blocks,
+        corrected_image,
+        rotation_angle,
+    })
 }
 
 #[tauri::command]
@@ -129,16 +171,35 @@ fn switch_model(
 ) -> Result<(), String> {
     let model_dir = find_models_root(&app)?.join(&variant);
 
-    let det_path = model_dir.join("det.onnx");
-    let rec_path = model_dir.join("rec.onnx");
-    let keys_path = model_dir.join("keys.txt");
+    // Check for subdirectories (mobile/server) or direct files
+    let (det_path, rec_path, keys_path) = if model_dir.join("det.onnx").is_file() {
+        (
+            model_dir.join("det.onnx"),
+            model_dir.join("rec.onnx"),
+            model_dir.join("keys.txt"),
+        )
+    } else if model_dir.join("mobile").join("det.onnx").is_file() {
+        (
+            model_dir.join("mobile").join("det.onnx"),
+            model_dir.join("mobile").join("rec.onnx"),
+            model_dir.join("mobile").join("keys.txt"),
+        )
+    } else if model_dir.join("server").join("rec.onnx").is_file() {
+        (
+            model_dir.join("mobile").join("det.onnx"),  // det is always from mobile
+            model_dir.join("server").join("rec.onnx"),
+            model_dir.join("server").join("keys.txt"),
+        )
+    } else {
+        return Err(format!("模型目录 {variant} 中未找到模型文件"));
+    };
 
     let det_bytes = std::fs::read(&det_path)
-        .map_err(|e| format!("读取 {variant}/det.onnx 失败: {e}"))?;
+        .map_err(|e| format!("读取 det.onnx 失败: {e}"))?;
     let rec_bytes = std::fs::read(&rec_path)
-        .map_err(|e| format!("读取 {variant}/rec.onnx 失败: {e}"))?;
+        .map_err(|e| format!("读取 rec.onnx 失败: {e}"))?;
     let keys_bytes = std::fs::read(&keys_path)
-        .map_err(|e| format!("读取 {variant}/keys.txt 失败: {e}"))?;
+        .map_err(|e| format!("读取 keys.txt 失败: {e}"))?;
 
     let engine = ocr::OcrEngine::new(&det_bytes, &rec_bytes, &keys_bytes)
         .map_err(|e| format!("加载模型 {variant} 失败: {e}"))?;
@@ -174,13 +235,66 @@ fn find_models_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 fn load_model_for_variant(app: &tauri::AppHandle, variant: &str) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), String> {
     let root = find_models_root(app)?;
     let dir = root.join(variant);
-    let det = std::fs::read(dir.join("det.onnx"))
-        .map_err(|e| format!("读取 {variant}/det.onnx 失败: {e}"))?;
-    let rec = std::fs::read(dir.join("rec.onnx"))
-        .map_err(|e| format!("读取 {variant}/rec.onnx 失败: {e}"))?;
-    let keys = std::fs::read(dir.join("keys.txt"))
-        .map_err(|e| format!("读取 {variant}/keys.txt 失败: {e}"))?;
+
+    // Check for subdirectories (mobile/server) or direct files
+    let (det_path, rec_path, keys_path) = if dir.join("det.onnx").is_file() {
+        (
+            dir.join("det.onnx"),
+            dir.join("rec.onnx"),
+            dir.join("keys.txt"),
+        )
+    } else if dir.join("mobile").join("det.onnx").is_file() {
+        (
+            dir.join("mobile").join("det.onnx"),
+            dir.join("mobile").join("rec.onnx"),
+            dir.join("mobile").join("keys.txt"),
+        )
+    } else if dir.join("server").join("rec.onnx").is_file() {
+        (
+            dir.join("mobile").join("det.onnx"),  // det is always from mobile
+            dir.join("server").join("rec.onnx"),
+            dir.join("server").join("keys.txt"),
+        )
+    } else {
+        return Err(format!("模型目录 {variant} 中未找到模型文件"));
+    };
+
+    let det = std::fs::read(&det_path)
+        .map_err(|e| format!("读取 det.onnx 失败: {e}"))?;
+    let rec = std::fs::read(&rec_path)
+        .map_err(|e| format!("读取 rec.onnx 失败: {e}"))?;
+    let keys = std::fs::read(&keys_path)
+        .map_err(|e| format!("读取 keys.txt 失败: {e}"))?;
     Ok((det, rec, keys))
+}
+
+fn find_doc_ori_model(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    // Production: bundled resources
+    if let Ok(res_dir) = app.path().resource_dir() {
+        let path = res_dir.join("models").join("PP-LCNet_x1_0_doc_ori").join("PP-LCNet_x1_0_doc_ori.onnx");
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+    // Development: relative paths
+    let candidates = [
+        PathBuf::from("src-tauri").join("models").join("PP-LCNet_x1_0_doc_ori").join("PP-LCNet_x1_0_doc_ori.onnx"),
+        PathBuf::from("models").join("PP-LCNet_x1_0_doc_ori").join("PP-LCNet_x1_0_doc_ori.onnx"),
+    ];
+    for path in &candidates {
+        if path.is_file() {
+            return Ok(path.clone());
+        }
+    }
+    Err("方向分类模型 PP-LCNet_x1_0_doc_ori.onnx 未找到".into())
+}
+
+fn load_doc_ori_classifier(app: &tauri::AppHandle) -> Result<ocr::DocOrientationClassifier, String> {
+    let model_path = find_doc_ori_model(app)?;
+    let model_bytes = std::fs::read(&model_path)
+        .map_err(|e| format!("读取方向分类模型失败: {}", e))?;
+    ocr::DocOrientationClassifier::new(&model_bytes)
+        .map_err(|e| format!("初始化方向分类器失败: {}", e))
 }
 
 fn find_bundled_tools_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
@@ -229,6 +343,14 @@ pub fn run() {
             let engine = ocr::OcrEngine::new(&det_bytes, &rec_bytes, &keys_bytes)
                 .map_err(|e| format!("Failed to init OCR: {}", e))?;
 
+            // 加载文档方向分类器
+            let orientation_classifier = load_doc_ori_classifier(&app.handle()).ok();
+            if orientation_classifier.is_some() {
+                eprintln!("[xc-ocr] 方向分类器加载成功");
+            } else {
+                eprintln!("[xc-ocr] 方向分类器加载失败，将跳过自动旋转");
+            }
+
             let mut renderer = docx_to_image::DocxRenderer::new();
             if let Some(tools_dir) = find_bundled_tools_dir(&app.handle()) {
                 renderer = renderer.add_tool_dir(tools_dir);
@@ -236,6 +358,7 @@ pub fn run() {
 
             app.manage(OcrState {
                 engine: Mutex::new(Some(engine)),
+                orientation_classifier: Mutex::new(orientation_classifier),
                 renderer,
             });
             Ok(())
