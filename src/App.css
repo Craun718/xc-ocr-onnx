@@ -138,6 +138,32 @@ body {
   border-color: #396cd8;
 }
 
+.order-selector {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.order-selector label {
+  font-size: 13px;
+  color: #aaa;
+}
+
+.order-selector select {
+  background: #444;
+  color: #eee;
+  border: 1px solid #555;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 13px;
+  cursor: pointer;
+  outline: none;
+}
+
+.order-selector select:hover {
+  border-color: #396cd8;
+}
+
 .loading-hint {
   text-align: center;
   padding: 20px;

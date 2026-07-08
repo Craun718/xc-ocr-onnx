@@ -67,6 +67,7 @@ function App() {
     const [filePath, setFilePath] = useState("");
     const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
     const [searchQuery, setSearchQuery] = useState("");
+    const [orderBy, setOrderBy] = useState("Score");
 
     // Zoom: absolute scale (1 = native pixels, 0.5 = half, 2 = double)
     const [zoomLevel, setZoomLevel] = useState(1);
@@ -221,6 +222,7 @@ function App() {
             const result: RecognizeResult = await invoke("recognize_image", {
                 filename: label,
                 data: inputData,
+                orderBy: orderBy,
             });
 
             // 如果检测到旋转并矫正了图像，更新显示的图像
@@ -513,6 +515,17 @@ function App() {
                         </select>
                     </div>
                 )}
+                <div className="order-selector">
+                    <label>排序：</label>
+                    <select
+                        value={orderBy}
+                        onChange={(e) => setOrderBy(e.target.value)}
+                    >
+                        <option value="Horizontal">水平</option>
+                        <option value="Vertical">垂直</option>
+                        <option value="Score">分数</option>
+                    </select>
+                </div>
             </div>
 
             {loading && <div className="loading-hint">处理中，请稍候...</div>}
