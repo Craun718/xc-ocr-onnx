@@ -56,7 +56,7 @@ pub struct RecognizeResult {
     rotation_angle: u32,              // 检测到的旋转角度
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 fn recognize_image(
     state: tauri::State<OcrState>,
     filename: String,

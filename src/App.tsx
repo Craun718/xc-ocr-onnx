@@ -222,7 +222,7 @@ function App() {
             const result: RecognizeResult = await invoke("recognize_image", {
                 filename: label,
                 data: inputData,
-                orderBy: orderBy,
+                order_by: orderBy,
             });
 
             // 如果检测到旋转并矫正了图像，更新显示的图像
