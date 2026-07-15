@@ -3286,20 +3286,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ocr"
-version = "0.1.0"
-dependencies = [
- "geo",
- "image",
- "imageproc",
- "log",
- "ort",
- "parking_lot",
- "rayon",
- "serde",
-]
-
-[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3407,6 +3393,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "36820e9051aca1014ddc75770aab4d68bc1e9e632f0f5627c4086bc216fb583b"
 dependencies = [
  "ttf-parser",
+]
+
+[[package]]
+name = "paddleocr_rs_onnx"
+version = "0.1.0"
+dependencies = [
+ "geo",
+ "image",
+ "imageproc",
+ "log",
+ "ort",
+ "parking_lot",
+ "rayon",
+ "serde",
 ]
 
 [[package]]
@@ -6691,8 +6691,8 @@ dependencies = [
  "docx-to-image",
  "image",
  "log",
- "ocr",
  "ort",
+ "paddleocr_rs_onnx",
  "serde",
  "serde_json",
  "tauri",

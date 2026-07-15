@@ -1,0 +1,3 @@
+[submodule "crates/ocr"]
+	path = crates/ocr
+	url = git@github.com:Craun718/PaddleOCR-rs.git

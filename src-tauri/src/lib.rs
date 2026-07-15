@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::Manager;
 use log::{info, warn};
-use ocr::OrderBy;
+use paddleocr_rs_onnx::OrderBy;
 
 use base64::Engine;
 use serde::Serialize;
@@ -17,8 +17,8 @@ pub struct PageImage {
 }
 
 struct OcrState {
-    engine: Mutex<Option<ocr::OcrEngine>>,
-    orientation_classifier: Mutex<Option<ocr::DocOrientationClassifier>>,
+    engine: Mutex<Option<paddleocr_rs_onnx::OcrEngine>>,
+    orientation_classifier: Mutex<Option<paddleocr_rs_onnx::DocOrientationClassifier>>,
     renderer: docx_to_image::DocxRenderer,
 }
 
@@ -52,7 +52,7 @@ fn encode_png_base64(img: &image::RgbaImage) -> Result<String, String> {
 
 #[derive(Serialize)]
 pub struct RecognizeResult {
-    blocks: Vec<ocr::OcrBlock>,
+    blocks: Vec<paddleocr_rs_onnx::OcrBlock>,
     corrected_image: Option<String>,  // 矫正后的图像 base64（如果有旋转）
     rotation_angle: u32,              // 检测到的旋转角度
 }
@@ -281,7 +281,7 @@ fn switch_model(
     let keys_bytes = std::fs::read(&keys_path)
         .map_err(|e| format!("读取 keys.txt 失败: {e}"))?;
 
-    let engine = ocr::OcrEngine::new(&det_bytes, &rec_bytes, &keys_bytes)
+    let engine = paddleocr_rs_onnx::OcrEngine::new(&det_bytes, &rec_bytes, &keys_bytes)
         .map_err(|e| format!("加载模型 {variant} 失败: {e}"))?;
 
     let mut guard = state.engine.lock().map_err(|e| e.to_string())?;
@@ -369,11 +369,11 @@ fn find_doc_ori_model(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Err("方向分类模型 PP-LCNet_x1_0_doc_ori.onnx 未找到".into())
 }
 
-fn load_doc_ori_classifier(app: &tauri::AppHandle) -> Result<ocr::DocOrientationClassifier, String> {
+fn load_doc_ori_classifier(app: &tauri::AppHandle) -> Result<paddleocr_rs_onnx::DocOrientationClassifier, String> {
     let model_path = find_doc_ori_model(app)?;
     let model_bytes = std::fs::read(&model_path)
         .map_err(|e| format!("读取方向分类模型失败: {}", e))?;
-    ocr::DocOrientationClassifier::new(&model_bytes)
+    paddleocr_rs_onnx::DocOrientationClassifier::new(&model_bytes)
         .map_err(|e| format!("初始化方向分类器失败: {}", e))
 }
 
@@ -429,7 +429,7 @@ pub fn run() {
             let (det_bytes, rec_bytes, keys_bytes) =
                 load_model_for_variant(&app.handle(), default_variant)?;
 
-            let engine = ocr::OcrEngine::new(&det_bytes, &rec_bytes, &keys_bytes)
+            let engine = paddleocr_rs_onnx::OcrEngine::new(&det_bytes, &rec_bytes, &keys_bytes)
                 .map_err(|e| format!("Failed to init OCR: {}", e))?;
 
             // 加载文档方向分类器

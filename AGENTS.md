@@ -7,7 +7,7 @@ This repository combines a React frontend with a Rust/Tauri desktop backend.
 - `src/`: React 19 UI (`App.tsx`, `main.tsx`, `App.css`), static assets in `src/assets/`
 - `src-tauri/src/`: Tauri command layer and desktop entrypoints
 - `src-tauri/models/ocr/`: bundled OCR model variants (`v4/mobile`, `v4/server`, `v6/...`)
-- `crates/ocr/`: ONNX-based OCR engine
+- `crates/ocr/`: git submodule → [Craun718/PaddleOCR-rs](https://github.com/Craun718/PaddleOCR-rs), ONNX-based OCR engine
 - `crates/docx-to-image/`: DOCX/PDF rendering helpers
 - `test/`: sample DOCX/PDF files for manual verification
 - `scripts/download-tools.ps1` and `tools/windows-x86_64/`: Windows-side helper tooling

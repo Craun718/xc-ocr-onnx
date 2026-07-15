@@ -27,7 +27,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ort = "2.0.0-rc.12"
 docx-to-image = { path = "../crates/docx-to-image" }
-ocr = { path = "../crates/ocr" }
+paddleocr_rs_onnx = { path = "../crates/ocr" }
 image = "0.25"
 base64 = "0.22"
 

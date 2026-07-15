@@ -6,22 +6,11 @@
 
 项目由三个 Rust crate 组成：
 
-### `crates/ocr` — OCR 引擎核心
+### `PaddleOCR-rs` — OCR 引擎核心（独立仓库）
 
-```
-crates/ocr/src/
-├── lib.rs      # OcrEngine + DocOrientationClassifier
-├── det.rs      # 文本检测 (DBNet)
-├── rec.rs      # 文本识别 (CRNN)
-├── decode.rs   # CTC 解码
-└── cls.rs      # 文档方向分类 (PP-LCNet)
-```
+OCR 引擎已拆分为独立仓库 [Craun718/PaddleOCR-rs](https://github.com/Craun718/PaddleOCR-rs)，通过 git submodule 引入。
 
-- **检测** `det.rs`：输入图像经等比例缩放（长边 960px）、pad 至 32 对齐、归一化后送入 DBNet 模型，输出概率图后经 DB 后处理（阈值 0.3、Unclip ratio 2.0）得到文本框
-- **识别** `rec.rs`：对每个检测框做透视变换、缩放到识别模型高度（48px）、宽度自适应或固定，逐行识别
-- **并发**：识别 session 池（pool size = min(CPU 核数, 4)），通过 `Condvar` 实现工作线程间复用
-- **解码** `decode.rs`：CTC 贪心解码，折叠重复字符，去除 blank（索引 0），保留各字符置信度取均值
-- **方向分类** `cls.rs`：PP-LCNet_x1_0_doc_ori 模型，输出 4 类（0°/90°/180°/270°），置信度最高者作为文档方向，自动旋转矫正
+包含文本检测（DBNet）、文本识别（CRNN）、CTC 解码、文档方向分类（PP-LCNet）模块。
 
 ### `crates/docx-to-image` — 文档渲染
 
