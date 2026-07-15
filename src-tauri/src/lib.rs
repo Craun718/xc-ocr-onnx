@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::Manager;
 use log::{info, warn};
+use ocr::OrderBy;
 
 use base64::Engine;
 use serde::Serialize;
@@ -98,16 +99,15 @@ fn recognize_image(
         (img, 0, None)
     };
 
-    let mut blocks = engine.recognize_all(&img).map_err(|e| e.to_string())?;
+    let order = match order_by.as_deref().unwrap_or("Horizontal") {
+        "Vertical" => OrderBy::Vertical,
+        "Score" => OrderBy::Score,
+        _ => OrderBy::Horizontal,
+    };
+    let blocks = engine.recognize_all(&img, order).map_err(|e| e.to_string())?;
     info!("[xc-ocr] 识别完成: {}, {} 个文本块", filename, blocks.len());
     for (i, b) in blocks.iter().enumerate() {
         info!("[xc-ocr]   [{:>3}] conf={:.3} text={}", i, b.confidence, b.text);
-    }
-    // 结果排序
-    match order_by.as_deref().unwrap_or("Horizontal") {
-        "Vertical" => blocks.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y))),
-        "Score" => blocks.sort_by(|a, b| b.confidence.total_cmp(&a.confidence)),
-        _ => blocks.sort_by(|a, b| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x))),
     }
     Ok(RecognizeResult {
         blocks,
