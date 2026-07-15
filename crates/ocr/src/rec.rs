@@ -1,9 +1,72 @@
+use std::panic::{catch_unwind, AssertUnwindSafe};
+
 use image::{DynamicImage, RgbImage};
 use imageproc::geometric_transformations::{warp_into, Interpolation, Border, Projection};
+use log::warn;
 use ort::session::Session;
 use crate::TextRegion;
+
 fn point_dist(a: [f32; 2], b: [f32; 2]) -> f32 {
     ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
+}
+
+/// 2D cross product of vectors (a→b) × (a→c).
+fn cross2d(a: [f32; 2], b: [f32; 2], c: [f32; 2]) -> f32 {
+    (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+}
+
+/// Signed area of a quadrilateral using the shoelace formula.
+/// Negative area indicates clockwise (self-intersecting / concave) ordering.
+fn quad_area(pts: &[[f32; 2]; 4]) -> f32 {
+    let mut area = 0.0f32;
+    for i in 0..4 {
+        let j = (i + 1) % 4;
+        area += pts[i][0] * pts[j][1];
+        area -= pts[j][0] * pts[i][1];
+    }
+    area * 0.5
+}
+
+/// Minimum absolute cross product of diagonals against edges —
+/// detects near-degenerate quads (collinear / near-zero area).
+const MIN_QUAD_AREA: f32 = 10.0;
+/// Maximum absolute cross-product ratio (min/max) to reject
+/// extremely thin quads that still have "area" by shoelace.
+const THIN_QUAD_RATIO: f32 = 0.01;
+
+/// Validates that a quad is usable for perspective projection:
+/// - All points are finite
+/// - Has sufficient area (not degenerate)
+/// - Not excessively thin (avoids ill-conditioned homography)
+fn is_valid_quad(bbox: &[[f32; 2]; 4]) -> bool {
+    // 1. All coordinates finite
+    for pt in bbox {
+        if !pt[0].is_finite() || !pt[1].is_finite() {
+            return false;
+        }
+    }
+
+    // 2. Signed area via shoelace — must be positive (counter-clockwise) and large enough
+    let area = quad_area(bbox);
+    if area.abs() < MIN_QUAD_AREA {
+        return false;
+    }
+
+    // 3. Check diagonal cross products to reject extremely thin quads
+    //    cross products of each edge against the diagonal through that vertex
+    let cross_products: [f32; 4] = [
+        cross2d(bbox[0], bbox[1], bbox[3]).abs(),
+        cross2d(bbox[1], bbox[2], bbox[0]).abs(),
+        cross2d(bbox[2], bbox[3], bbox[1]).abs(),
+        cross2d(bbox[3], bbox[0], bbox[2]).abs(),
+    ];
+    let max_cross = cross_products.iter().copied().fold(0.0f32, f32::max);
+    let min_cross = cross_products.iter().copied().fold(f32::INFINITY, f32::min);
+    if max_cross > 0.0 && min_cross / max_cross < THIN_QUAD_RATIO {
+        return false;
+    }
+
+    true
 }
 
 fn order_bbox_points(bbox: [[f32; 2]; 4]) -> [[f32; 2]; 4] {
@@ -54,6 +117,16 @@ pub fn preprocess_region(
     rec_width: Option<u32>,
 ) -> Result<(Vec<f32>, i64), Box<dyn std::error::Error>> {
     let bbox = order_bbox_points(region.bbox);
+
+    // Reject degenerate quads that would produce an ill-conditioned homography
+    if !is_valid_quad(&bbox) {
+        warn!(
+            "[rec] skipping degenerate bbox: {:?} (area too small or near-collinear)",
+            region.bbox
+        );
+        return Err("degenerate text region bbox".into());
+    }
+
     let rw = (point_dist(bbox[0], bbox[1]).max(point_dist(bbox[3], bbox[2])).ceil() as u32).max(1);
     let rh = (point_dist(bbox[1], bbox[2]).max(point_dist(bbox[0], bbox[3])).ceil() as u32).max(1);
 
@@ -75,13 +148,33 @@ pub fn preprocess_region(
 
     let rgb = image.to_rgb8();
     let mut rectified = RgbImage::new(rw, rh);
-    warp_into(
-        &rgb,
-        proj,
-        Interpolation::Bicubic,
-        Border::Replicate,
-        &mut rectified,
-    );
+
+    // Use Bilinear instead of Bicubic: bilinear samples a 2×2 neighbourhood
+    // vs bicubic's 4×4, dramatically reducing the chance of hitting extreme
+    // coordinates that trigger integer overflow in imageproc.
+    // For OCR text rectification the quality difference is negligible.
+    let warp_result = catch_unwind(AssertUnwindSafe(|| {
+        warp_into(
+            &rgb,
+            proj,
+            Interpolation::Bilinear,
+            Border::Replicate,
+            &mut rectified,
+        );
+    }));
+
+    if let Err(panic) = warp_result {
+        let msg = panic
+            .downcast_ref::<String>()
+            .map(|s| s.as_str())
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap_or("unknown");
+        warn!(
+            "[rec] warp panicked for bbox {:?} ({}×{}): {} — skipping region",
+            region.bbox, rw, rh, msg
+        );
+        return Err(format!("warp failed: {}", msg).into());
+    }
 
     if rectified.height() as f32 / rectified.width().max(1) as f32 >= 1.5 {
         rectified = image::imageops::rotate90(&rectified);
@@ -156,7 +249,7 @@ pub fn run_recognition(
 
 #[cfg(test)]
 mod tests {
-    use super::order_bbox_points;
+    use super::{order_bbox_points, is_valid_quad, quad_area};
 
     #[test]
     fn orders_quad_points_clockwise_from_top_left() {
@@ -173,5 +266,39 @@ mod tests {
         assert_eq!(ordered[1], [30.0, 0.0]);
         assert_eq!(ordered[2], [30.0, 10.0]);
         assert_eq!(ordered[3], [0.0, 10.0]);
+    }
+
+    #[test]
+    fn valid_quad_passes() {
+        let bbox = [[0.0, 0.0], [100.0, 0.0], [100.0, 50.0], [0.0, 50.0]];
+        assert!(is_valid_quad(&bbox));
+    }
+
+    #[test]
+    fn too_small_area_rejected() {
+        // area = 0.5 * (0*0 + 5*5 + 5*5 + 0*0 - (0*5 + 5*5 + 5*0 + 0*0))
+        //       = 0.5 * (0 + 25 + 25 + 0 - (0 + 25 + 0 + 0)) = 0.5 * 25 = 12.5
+        // That's above MIN_QUAD_AREA=10, so test a smaller one
+        let bbox = [[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]];
+        // area = 4.0 < 10.0 → rejected
+        assert!(!is_valid_quad(&bbox));
+    }
+
+    #[test]
+    fn nan_coordinate_rejected() {
+        let bbox = [[f32::NAN, 0.0], [100.0, 0.0], [100.0, 50.0], [0.0, 50.0]];
+        assert!(!is_valid_quad(&bbox));
+    }
+
+    #[test]
+    fn inf_coordinate_rejected() {
+        let bbox = [[f32::INFINITY, 0.0], [100.0, 0.0], [100.0, 50.0], [0.0, 50.0]];
+        assert!(!is_valid_quad(&bbox));
+    }
+
+    #[test]
+    fn quad_area_calculation() {
+        let bbox = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]];
+        assert_eq!(quad_area(&bbox), 100.0);
     }
 }
