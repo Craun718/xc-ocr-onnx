@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use parking_lot::{Mutex, Condvar};
 use std::collections::VecDeque;
 use rayon::prelude::*;
 use log::{info, warn};
@@ -29,10 +29,17 @@ pub struct OcrBlock {
     pub height: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OrderBy {
+    Horizontal,
+    Vertical,
+    Score,
+}
+
 pub struct OcrEngine {
     det_session: Mutex<ort::session::Session>,
     rec_sessions: Mutex<VecDeque<ort::session::Session>>,
-    rec_sessions_cvar: std::sync::Condvar,
+    rec_sessions_cvar: Condvar,
     det_input: String,
     det_output: String,
     rec_input: String,
@@ -90,13 +97,11 @@ impl OcrEngine {
         }
 
         // build session pool for concurrent recognition
-        let pool_size = std::cmp::min(
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(2),
-            4,
-        );
-        info!("[ocr] creating rec session pool of size {}", pool_size);
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(2);
+        let pool_size = (cores / 2).max(1);
+        info!("[ocr] creating rec session pool of size {} (cores={})", pool_size, cores);
 
         let mut sessions = VecDeque::with_capacity(pool_size);
         sessions.push_back(rec_session);
@@ -109,7 +114,7 @@ impl OcrEngine {
         Ok(Self {
             det_session: Mutex::new(det_session),
             rec_sessions: Mutex::new(sessions),
-            rec_sessions_cvar: std::sync::Condvar::new(),
+            rec_sessions_cvar: Condvar::new(),
             det_input,
             det_output,
             rec_input,
@@ -121,7 +126,7 @@ impl OcrEngine {
     }
 
     pub fn detect_text_regions(&self, image: &DynamicImage) -> Result<Vec<TextRegion>, String> {
-        let mut session = self.det_session.lock().map_err(|e| format!("{}", e))?;
+        let mut session = self.det_session.lock();
         det::detect_text_regions(&mut session, image, &self.det_input, &self.det_output)
             .map_err(|e| e.to_string())
     }
@@ -132,13 +137,12 @@ impl OcrEngine {
 
         // Pop a session from the pool, blocking until one is available
         let mut session = {
-            let mut pool = self.rec_sessions.lock().map_err(|e| format!("{}", e))?;
+            let mut pool = self.rec_sessions.lock();
             loop {
                 if let Some(s) = pool.pop_front() {
                     break s;
                 }
-                // Wait until a session is returned to the pool
-                pool = self.rec_sessions_cvar.wait(pool).map_err(|e| format!("{}", e))?;
+                self.rec_sessions_cvar.wait(&mut pool);
             }
         };
 
@@ -147,7 +151,7 @@ impl OcrEngine {
 
         // Always return session to pool and notify waiters
         {
-            let mut pool = self.rec_sessions.lock().map_err(|e| format!("{}", e))?;
+            let mut pool = self.rec_sessions.lock();
             pool.push_back(session);
             self.rec_sessions_cvar.notify_one();
         }
@@ -156,7 +160,7 @@ impl OcrEngine {
         Ok(decode::ctc_decode(&probs, &self.keys))
     }
 
-    pub fn recognize_all(&self, image: &DynamicImage) -> Result<Vec<OcrBlock>, String> {
+    pub fn recognize_all(&self, image: &DynamicImage, order_by: OrderBy) -> Result<Vec<OcrBlock>, String> {
         let regions = self.detect_text_regions(image)?;
         if regions.is_empty() {
             if let Some(block) = self.recognize_full_image(image)? {
@@ -165,12 +169,18 @@ impl OcrEngine {
             return Ok(Vec::new());
         }
 
-        let mut blocks = regions
+        let mut blocks: Vec<OcrBlock> = regions
             .par_iter()
-            .map(|region| {
-                let decoded = self.recognize_text(image, region)?;
+            .filter_map(|region| {
+                let decoded = match self.recognize_text(image, region) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        warn!("[ocr] skipping region {:?}: {}", region.bbox, e);
+                        return None;
+                    }
+                };
                 let (x, y, w, h) = bbox_to_rect(&region.bbox);
-                Ok::<OcrBlock, String>(OcrBlock {
+                Some(OcrBlock {
                     text: decoded.text,
                     confidence: decoded.score,
                     x,
@@ -179,9 +189,13 @@ impl OcrEngine {
                     height: h,
                 })
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect();
 
-        blocks.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+        match order_by {
+            OrderBy::Horizontal => blocks.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y))),
+            OrderBy::Vertical => blocks.sort_by(|a, b| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x))),
+            OrderBy::Score => blocks.sort_by(|a, b| b.confidence.total_cmp(&a.confidence)),
+        }
         Ok(blocks)
     }
 
@@ -291,7 +305,7 @@ impl DocOrientationClassifier {
     /// # Returns
     /// An `OrientationResult` containing the detected orientation and confidence score.
     pub fn classify(&self, image: &DynamicImage) -> Result<OrientationResult, String> {
-        let mut session = self.session.lock().map_err(|e| format!("{}", e))?;
+        let mut session = self.session.lock();
         cls::classify_orientation(&mut session, image, &self.input_name, &self.output_name)
             .map_err(|e| e.to_string())
     }

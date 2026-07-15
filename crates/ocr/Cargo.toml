@@ -11,3 +11,4 @@ geo = "0.33"
 serde = { version = "1", features = ["derive"] }
 rayon = "1"
 log = "0.4"
+parking_lot = "0.12"
